@@ -1,21 +1,63 @@
 #!/bin/bash
 # 视频检查器启动器: 服务未运行则启动，然后打开浏览器
-export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
-DIR="$HOME/Documents/谷歌云盘视频检查器"
+# 自诊断: 全程写 boot 日志到 ~/Library/Logs (不受 Documents TCC 限制，始终可写)
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
+DIR="$HOME/谷歌云盘视频检查器"
 URL="http://127.0.0.1:5572"
+BOOT="$HOME/Library/Logs/video-checker-boot.log"
 
-if ! curl -s -o /dev/null --max-time 2 "$URL"; then
-  cd "$DIR" || { osascript -e 'display alert "视频检查器" message "找不到项目目录"'; exit 1; }
-  nohup node server.js >> server.log 2>&1 &
-  disown
-  for _ in $(seq 1 30); do
-    sleep 0.5
-    curl -s -o /dev/null --max-time 1 "$URL" && break
-  done
-  if ! curl -s -o /dev/null --max-time 2 "$URL"; then
-    osascript -e 'display alert "视频检查器" message "服务启动失败，请查看项目目录下的 server.log"'
-    exit 1
-  fi
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$BOOT"; }
+
+fail() { # $1 = 面向用户的说明
+  log "FAIL: $1"
+  osascript -e "display alert \"视频检查器\" message \"$1\n\n诊断日志: ~/Library/Logs/video-checker-boot.log\""
+  exit 1
+}
+
+: > "$BOOT" 2>/dev/null  # 每次启动清空 boot 日志
+log "===== 启动 ====="
+log "whoami=$(whoami) PATH=$PATH"
+log "node=$(command -v node || echo 未找到)  rclone=$(command -v rclone || echo 未找到)"
+
+# 服务已在运行?
+if curl -s -o /dev/null --max-time 2 "$URL"; then
+  log "服务已在运行, 直接打开浏览器"
+  open "$URL"; exit 0
 fi
 
+# 依赖检查
+command -v node   >/dev/null || fail "未找到 node，请确认已安装 Node.js"
+command -v rclone >/dev/null || fail "未找到 rclone，请确认已安装 rclone"
+
+# 绝对路径读文件探针 (CWD 保持在非保护目录, 避开 getcwd 的 TCC 拦截)
+if head -c 1 "$DIR/server.js" >/dev/null 2>>"$BOOT"; then
+  log "server.js 绝对路径可读"
+else
+  fail "无法按绝对路径读取 server.js (需在 系统设置>隐私与安全性>文件与文件夹 或 完全磁盘访问 中授权本 app)"
+fi
+
+# 清理可能残留但已卡死的旧进程
+pkill -f "$DIR/server.js" 2>/dev/null
+
+log "启动 node server.js (CWD=/ 以避开 Documents 的 getcwd 拦截)"
+NODELOG="$HOME/Library/Logs/video-checker-node.log"
+: > "$NODELOG" 2>/dev/null
+# 关键: 从根目录启动 node, 用绝对路径指向 server.js; server.js 内部全部用 __dirname, 不依赖 CWD
+nohup bash -c "cd /; node '$DIR/server.js'; echo \"NODE_EXIT_CODE=\$?\"" >> "$NODELOG" 2>&1 &
+disown
+NODE_PID=$!
+log "node 包装进程 PID=$NODE_PID, 输出→$NODELOG"
+
+# 等待就绪 (最多 30 秒)
+for _ in $(seq 1 60); do
+  sleep 0.5
+  curl -s -o /dev/null --max-time 1 "$URL" && break
+done
+
+if ! curl -s -o /dev/null --max-time 2 "$URL"; then
+  kill -0 "$NODE_PID" 2>/dev/null && log "node 进程仍存活但端口无响应" || log "node 进程已退出"
+  fail "服务启动失败 (node 已启动但端口无响应)"
+fi
+
+log "===== 启动成功 ====="
 open "$URL"
