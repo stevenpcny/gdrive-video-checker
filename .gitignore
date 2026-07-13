@@ -1,0 +1,17 @@
+# 密钥（服务账号私钥落点，绝不上传）
+keys/
+
+# 个人数据：标记记录含个人文件夹结构与文件名
+marks.json
+
+# 运行时
+server.log
+*.log
+
+# 本地编辑器/系统
+.DS_Store
+.claude/settings.local.json
+
+# 缓存/临时（本就在系统 tmp，非仓库内，列此以防万一）
+video-checker-thumbs/
+video-checker-cache/

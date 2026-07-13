@@ -1,0 +1,21 @@
+#!/bin/bash
+# 视频检查器启动器: 服务未运行则启动，然后打开浏览器
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+DIR="$HOME/Documents/谷歌云盘视频检查器"
+URL="http://127.0.0.1:5572"
+
+if ! curl -s -o /dev/null --max-time 2 "$URL"; then
+  cd "$DIR" || { osascript -e 'display alert "视频检查器" message "找不到项目目录"'; exit 1; }
+  nohup node server.js >> server.log 2>&1 &
+  disown
+  for _ in $(seq 1 30); do
+    sleep 0.5
+    curl -s -o /dev/null --max-time 1 "$URL" && break
+  done
+  if ! curl -s -o /dev/null --max-time 2 "$URL"; then
+    osascript -e 'display alert "视频检查器" message "服务启动失败，请查看项目目录下的 server.log"'
+    exit 1
+  fi
+fi
+
+open "$URL"
