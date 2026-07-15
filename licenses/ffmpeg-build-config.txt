@@ -1,0 +1,7 @@
+FFmpeg 8.1
+Source: https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz
+SHA-256: b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a
+Deployment target: macOS 12.0
+License profile: LGPL-only; --enable-gpl and --enable-nonfree are not used
+Architectures: x86_64, arm64
+Purpose: local thumbnail extraction only

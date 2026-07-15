@@ -1,0 +1,55 @@
+appId: com.local.videochecker
+productName: 视频检查器
+copyright: Copyright © 2026
+
+asar: true
+npmRebuild: false
+
+files:
+  - electron/**/*
+  - public/**/*
+  - server.js
+  - package.json
+  - '!public/__resize_probe.html'
+
+extraResources:
+  - from: vendor/bin
+    to: bin
+    filter:
+      - '**/*'
+  - from: licenses
+    to: licenses
+    filter:
+      - '**/*'
+
+mac:
+  icon: build/icon.icns
+  category: public.app-category.utilities
+  minimumSystemVersion: '15.0'
+  identity: '-'
+  hardenedRuntime: false
+  x64ArchFiles: 'Contents/Resources/bin/**'
+  target:
+    - target: dmg
+      arch:
+        - universal
+    - target: zip
+      arch:
+        - universal
+
+artifactName: '${productName}-${version}-${arch}.${ext}'
+
+dmg:
+  title: '${productName} ${version}'
+  contents:
+    - x: 150
+      y: 180
+      type: file
+    - x: 450
+      y: 180
+      type: link
+      path: /Applications
+
+directories:
+  buildResources: build
+  output: dist

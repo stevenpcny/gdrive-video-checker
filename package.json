@@ -1,0 +1,22 @@
+{
+  "name": "video-checker",
+  "version": "1.0.0",
+  "description": "Google Drive video review tool for macOS",
+  "author": "Video Checker",
+  "main": "electron/main.js",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "vendor:prepare": "node scripts/prepare-vendor.mjs",
+    "ffmpeg:build": "bash scripts/build-ffmpeg.sh",
+    "build:universal": "npm run vendor:prepare && npm run ffmpeg:build && electron-builder --mac --universal",
+    "verify:release": "node scripts/verify-release.mjs",
+    "release:local": "npm run build:universal && npm run verify:release"
+  },
+  "devDependencies": {
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3"
+  }
+}

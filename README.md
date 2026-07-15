@@ -1,50 +1,119 @@
-# 谷歌云盘视频检查器
+# 视频检查器
 
-快速检查 Google Drive 里的一组视频：流畅播放/拖动，键盘标记合格/不合格，不合格自动移入子文件夹。
+用于批量检查 Google Drive 视频：流式播放、进度条帧预览、合格/不合格标记、不合格自动移动、上传、重命名和文件夹导航。
 
-## 启动
+## 分发版
 
-```bash
-node server.js
+### 系统要求
+
+- macOS 15 或更高版本
+- 同一个 Universal 应用同时支持 Intel `x86_64` 和 Apple Silicon `arm64`
+- 不需要预装 Node.js、rclone、ffmpeg 或 Google Chrome
+- 需要联网访问 Google Drive
+
+### 安装
+
+发布目录提供：
+
+- `视频检查器-<版本>-universal.dmg`
+- `视频检查器-<版本>-universal.zip`
+- `SHA256SUMS`
+
+DMG：打开后将「视频检查器」拖入 Applications。ZIP：解压后将应用移入 Applications。
+
+当前版本使用 ad-hoc 签名，没有 Apple Developer ID，也没有 Apple 公证。通过浏览器下载后，macOS 可能阻止首次启动：
+
+1. 在 Finder 中右键「视频检查器」并选择「打开」。
+2. 如果仍被拦截，进入「系统设置 → 隐私与安全性」，选择「仍要打开」。
+3. 企业 MDM 管理的 Mac 可能不允许绕过 Gatekeeper。
+
+ad-hoc 签名只能证明应用包构建后未被修改，不能证明开发者身份。分发前请同时核对 `SHA256SUMS`。
+
+## 连接 Google Drive
+
+首次启动提供三种方式，配置只保存在当前 Mac：
+
+1. **服务账号 JSON**：导入 `type: service_account` 密钥，并将目标 Drive 文件夹共享给该服务账号邮箱。
+2. **导入 rclone.conf**：选择已有配置；应用会验证 remote，并在覆盖私有配置前备份旧文件。
+3. **Google OAuth**：应用通过内置 rclone 逐步配置，并在系统默认浏览器完成 Google 登录授权。
+
+应用使用独立的 rclone 配置，不修改 `~/.config/rclone/rclone.conf`。
+
+## 用户数据
+
+```text
+~/Library/Application Support/视频检查器/
+  marks.json
+  settings.json
+  keys/
+  rclone/rclone.conf
+  migration.json
+
+~/Library/Caches/local.video-checker/
+  video/
+  thumbs/
+  uploads/
+
+~/Library/Logs/视频检查器/
+  main.log
+  server.log
 ```
 
-然后浏览器打开 http://127.0.0.1:5572
-
-依赖：已配置好 Google Drive remote 的 rclone（remote 名为 `gdrive:`）。无 npm 依赖。
-可选依赖：ffmpeg（用于进度条拖动的即时帧预览；没有时拖动退回实时 seek，约 4-5 帧/秒）。
-
-也可以直接双击项目里的「视频检查器.app」：自动启动服务并打开页面。
-
-## 多账号
-
-侧栏顶部可切换账号（rclone remote）。「＋导入」支持**服务账号密钥 JSON**（`"type": "service_account"`）：选文件、起名字即完成，无需浏览器授权；导入时会验证密钥有效性，无效自动回滚。注意服务账号只能看到共享给它的 `client_email` 的文件夹或共享云端硬盘。OAuth 客户端凭据 JSON 需要浏览器授权，请在终端 `rclone config` 添加，添加后即出现在下拉框。标记记录按账号隔离。
+首次启动会复制旧版 `$HOME/谷歌云盘视频检查器/marks.json` 和 `keys/`，不会删除旧文件。检测到全局 rclone 配置时，可由用户选择是否导入。
 
 ## 使用
-
-左侧浏览文件夹，点击视频播放。快捷键：
 
 | 键 | 作用 |
 |---|---|
 | 空格 | 播放/暂停 |
-| ← / → | 后退/快进 5 秒（Shift 加持 30 秒） |
-| , / . | 逐帧后退/前进（查穿帮细节用） |
+| ← / → | 后退/快进 5 秒；Shift 为 30 秒 |
+| , / . | 逐帧后退/前进 |
 | ↑ / ↓ | 调倍速（0.5x–3x） |
 | M | 静音 |
-| G | 标记合格，自动下一个 |
-| B | 标记不合格 → 移入当前文件夹下的子文件夹（默认「不合格」，左下角可改名），自动下一个 |
+| G | 标记合格并切换下一个 |
+| B | 标记不合格、移入子文件夹并切换下一个 |
 | Enter / P | 下一个 / 上一个 |
 
-误按 B 后 6 秒内可点「撤销」把文件移回原位。播放完自动切下一个。
+误按不合格后可在提示消失前撤销。视频两侧区域可点击切换前后视频。窗口会根据视频横竖比例自动调整，并限制在当前屏幕可用范围内。
 
-**进度条拖动（查穿帮）**：按住进度条拖动，画面实时跟手显示对应时刻的帧（每秒 5 帧采样，来自 ffmpeg 预生成的缩略帧），任意位置零延迟；松手后播放器精确落到该时间点，再用 `,`/`.` 逐帧细看。打开视频后底部会依次出现「预载 x%」「已全载」「帧预览就绪」，全载后 seek 全部本地化、无网络延迟。
+## 开发
+
+```bash
+npm install
+npm start
+npm test
+```
+
+构建 Universal DMG 和 ZIP：
+
+```bash
+npm run release:local
+```
+
+构建过程会：
+
+- 使用 Electron 43.1.0 和 electron-builder 26.15.3。
+- 下载并校验 rclone 1.73.2 官方 x86_64/arm64 二进制。
+- 从 FFmpeg 8.1 官方源码构建 LGPL-only x86_64/arm64 二进制。
+- 生成 ad-hoc 签名 Universal 应用、DMG、ZIP、SHA-256 和构建 manifest。
 
 ## 架构
 
-- `server.js`：纯 Node 无依赖。**每个账号一条独立的 `rclone serve http` 通道**（5573 起按需分配端口，纯流式、不开 vfs 磁盘缓存——vfs 缓存按原文件名落盘，超长文件名（>255 字节）会直接打不开），所有 API 显式带 `remote` 参数、无全局"当前账号"状态——多个浏览器窗口可同时用不同账号互不干扰。预热缓存由服务自管：`rclone copyto` 下载到系统临时目录、文件名用哈希（上限 20G，LRU 淘汰，重启清空）；`/stream/<remote>/<path>` 优先从本地缓存按 Range 回源，未缓存则代理 rclone serve；`/api/list`（lsjson）、`/api/move`（moveto，Drive 服务端移动）、`/api/marks`（marks.json）、`/api/thumbs`（ffmpeg 5fps 抽帧）、`/api/prefetch`（预热，失败自动重试最多 3 轮）
-- `public/index.html`：单页 UI。进入文件夹即后台按列表顺序预热全部视频（拉进 rclone 磁盘缓存 + 预生成缩略帧，绿点=就绪，点开秒载）；打开视频即流式播放，同时整片拉进内存，载完无缝换 blob 源（seek 全本地化）；进度条拖动显示缩略帧覆盖层，松手精确 seek
+- `electron/main.js`：Electron 生命周期、安全 BrowserWindow、动态端口、窗口尺寸和内置工具定位。
+- `server.js`：可嵌入 HTTP 服务、Google Drive API 工作流、Range 视频流、缓存、缩略图和 rclone 子进程管理。
+- `public/`：无 Node 权限的 renderer UI；通过带随机 token 的 loopback 服务访问后端。
+- `vendor/bin/darwin-{x64,arm64}/`：包内 rclone/ffmpeg。
+- `scripts/`：双架构资源准备、FFmpeg 构建和发布验证。
+
+关闭主窗口会退出应用，并终止 rclone/ffmpeg 子进程和本地监听端口。
 
 ## 已知限制
 
-- 浏览器原生解码：H.264/VP9/AV1 可播；HEVC 等不行
-- 缺 seek 索引的 webm/mkv（如某些屏幕录制）拖动会很慢（浏览器需顺序下载），MP4 不受影响
-- `marks.json` 以文件路径为 key；在 Drive 网页端重命名/移动文件后标记会失联
+- 当前未经过 Apple 公证，首次打开有 Gatekeeper 提示。
+- Electron/Chromium 原生解码能力决定可播放格式；扩展名被列出不代表对应 codec 一定可用。
+- `marks.json` 以 remote 和文件路径为 key；在其他地方重命名或移动文件后旧标记不会自动跟随。
+- Intel 和 Apple Silicon 都包含在 Universal 包中，但正式发布仍应分别在真实 Intel Mac 和 Apple Silicon Mac 上验收。
+
+## 第三方许可证
+
+见应用包 `Contents/Resources/licenses/` 和源码目录 `licenses/`。FFmpeg 对应源码归档、SHA-256 与构建参数随发布包提供。

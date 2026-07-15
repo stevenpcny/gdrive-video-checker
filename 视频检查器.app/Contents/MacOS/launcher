@@ -5,6 +5,7 @@ export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 DIR="$HOME/谷歌云盘视频检查器"
 URL="http://127.0.0.1:5572"
 BOOT="$HOME/Library/Logs/video-checker-boot.log"
+API_VERSION=2
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$BOOT"; }
 
@@ -14,15 +15,39 @@ fail() { # $1 = 面向用户的说明
   exit 1
 }
 
+open_browser() {
+  if [ ! -d "/Applications/Google Chrome.app" ] && [ ! -d "$HOME/Applications/Google Chrome.app" ]; then
+    fail "未找到 Google Chrome，无法按视频尺寸自动调整窗口"
+  fi
+  log "以 Chrome 独立应用窗口打开 $URL"
+  open -na "Google Chrome" --args --app="$URL?standalone=1" --new-window --window-size=1200,900 \
+    || fail "无法打开 Google Chrome 独立窗口"
+}
+
+server_compatible() {
+  curl -fsS --max-time 2 "$URL/api/health" 2>/dev/null \
+    | grep -q "\"apiVersion\":$API_VERSION"
+}
+
 : > "$BOOT" 2>/dev/null  # 每次启动清空 boot 日志
 log "===== 启动 ====="
 log "whoami=$(whoami) PATH=$PATH"
 log "node=$(command -v node || echo 未找到)  rclone=$(command -v rclone || echo 未找到)"
 
-# 服务已在运行?
+# 只复用与当前界面匹配的后台，避免新界面连到旧 API
 if curl -s -o /dev/null --max-time 2 "$URL"; then
-  log "服务已在运行, 直接打开浏览器"
-  open "$URL"; exit 0
+  if server_compatible; then
+    log "兼容的服务已在运行, 直接打开浏览器"
+    open_browser; exit 0
+  fi
+  log "检测到旧版或不兼容的后台, 将自动重启"
+  pkill -f "$DIR/server.js" 2>/dev/null
+  for _ in $(seq 1 20); do
+    curl -s -o /dev/null --max-time 1 "$URL" || break
+    sleep 0.2
+  done
+  curl -s -o /dev/null --max-time 1 "$URL" \
+    && fail "5572 端口上的旧服务无法停止，请重启 Mac 后再试"
 fi
 
 # 依赖检查
@@ -51,13 +76,13 @@ log "node 包装进程 PID=$NODE_PID, 输出→$NODELOG"
 # 等待就绪 (最多 30 秒)
 for _ in $(seq 1 60); do
   sleep 0.5
-  curl -s -o /dev/null --max-time 1 "$URL" && break
+  server_compatible && break
 done
 
-if ! curl -s -o /dev/null --max-time 2 "$URL"; then
+if ! server_compatible; then
   kill -0 "$NODE_PID" 2>/dev/null && log "node 进程仍存活但端口无响应" || log "node 进程已退出"
-  fail "服务启动失败 (node 已启动但端口无响应)"
+  fail "服务启动失败或后台版本不匹配"
 fi
 
 log "===== 启动成功 ====="
-open "$URL"
+open_browser
