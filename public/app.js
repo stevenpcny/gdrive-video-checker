@@ -13,6 +13,8 @@ let curIdx = -1;
 let marks = {};
 let lastMove = null;
 let fitWindowSeq = 0;
+let publicMode = false;
+let currentPublicLink = null;
 
 // 整片预载状态
 let loadSeq = 0;
@@ -36,6 +38,9 @@ async function api(path, opts) {
 }
 
 let loadDirSeq = 0; // 防止先发出的慢响应覆盖后点的文件夹
+const warmedDirs = new Map();
+const WARM_DIR_TTL_MS = 20_000;
+let warmTimer = 0;
 
 function showListMessage(text, isError = false) {
   const row = document.createElement('div');
@@ -46,6 +51,7 @@ function showListMessage(text, isError = false) {
 
 async function loadDir(p) {
   const seq = ++loadDirSeq;
+  clearTimeout(warmTimer);
   curDir = p; curIdx = -1;
   showListMessage('加载中…');
   try {
@@ -59,9 +65,31 @@ async function loadDir(p) {
     videos = listing.entries.filter(e => !e.IsDir && isVideo(e.Name));
     applySort();
     render();
+    warmTimer = setTimeout(() => warmChildDirectories(seq), 250);
   } catch (e) {
     if (seq === loadDirSeq) showListMessage('加载失败: ' + e.message, true);
   }
+}
+
+async function warmChildDirectories(seq) {
+  if (seq !== loadDirSeq || !curRemote) return;
+  const remote = curRemote.replace(/:$/, '');
+  const queue = dirs.slice(0, 12).map(dir => curDir ? `${curDir}/${dir.Name}` : dir.Name)
+    .filter(path => {
+      const key = `${remote}\0${path}`;
+      if ((warmedDirs.get(key) || 0) > Date.now()) return false;
+      warmedDirs.set(key, Date.now() + WARM_DIR_TTL_MS);
+      return true;
+    });
+  const worker = async () => {
+    while (seq === loadDirSeq && queue.length) {
+      const path = queue.shift();
+      try {
+        await api('/api/list?remote=' + encodeURIComponent(remote) + '&path=' + encodeURIComponent(path));
+      } catch { /* 预热失败不影响用户正常打开文件夹 */ }
+    }
+  };
+  await Promise.all([worker(), worker()]);
 }
 
 // ---------- RAM 预热: 只保留当前、下一个、上一个 ----------
@@ -132,9 +160,11 @@ function render() {
     const el = document.createElement('div');
     el.className = 'entry';
     el.innerHTML = `<span class="icon">📁</span><span class="name"></span>` +
-      `<span class="actions"><span class="act-rename" title="重命名文件夹">✎</span><span class="act-del" title="删除文件夹（含内容）">🗑</span></span>`;
+      `<span class="act-share" title="管理共享权限">👥</span><span class="act-move" title="移动文件夹">⇲</span><span class="actions"><span class="act-rename" title="重命名文件夹">✎</span><span class="act-del" title="删除文件夹（含内容）">🗑</span></span>`;
     el.querySelector('.name').textContent = d.Name;
     el.onclick = () => loadDir((curDir ? curDir + '/' : '') + d.Name);
+    el.querySelector('.act-share').onclick = e => { e.stopPropagation(); openShareFolder(d); };
+    el.querySelector('.act-move').onclick = e => { e.stopPropagation(); openMoveFolder(d); };
     el.querySelector('.act-rename').onclick = e => { e.stopPropagation(); renameEntry(d, true); };
     el.querySelector('.act-del').onclick = e => { e.stopPropagation(); deleteFolder(d); };
     list.appendChild(el);
@@ -260,6 +290,29 @@ async function startFullLoad(v) {
   }
 }
 
+async function startPublicFullLoad(link) {
+  const seq = ++loadSeq;
+  const stateEl = $('load-state');
+  try {
+    stateEl.textContent = '边播边预载…';
+    const result = await api('/api/public/prefetch', {
+      method: 'POST',
+      body: JSON.stringify({ fileId: link.id, resourceKey: link.resourceKey })
+    });
+    if (seq !== loadSeq || !publicMode) return;
+    if (!result.cached) {
+      stateEl.textContent = (result.reason || '超过 RAM 限制') + '，分段流播';
+      return;
+    }
+    refreshRamStatus().catch(() => {});
+    cacheReady = true;
+    stateEl.textContent = '✓ 已预载到 RAM·可连续快速拖动' + (thumbFrames.size ? '·预览帧就绪' : '');
+    stateEl.className = 'ready';
+  } catch (e) {
+    if (seq === loadSeq && publicMode) stateEl.textContent = '预载失败，继续分段流播';
+  }
+}
+
 // ---------- 缩略帧条: 拖动时即时显示预解码画面 ----------
 let thumbs = null;      // {base, fps, count}
 let thumbSeq = 0;       // 防止切视频后旧结果写回
@@ -310,6 +363,32 @@ async function loadThumbs(v) {
   } catch { /* 无 ffmpeg 或生成失败: 拖动时保持当前完整画面 */ }
 }
 
+async function loadPublicThumbs(link) {
+  thumbsLoadingSeq = loadSeq;
+  const seq = ++thumbSeq;
+  thumbs = null;
+  thumbFrames = new Map();
+  thumbStride = 1;
+  requestedScrubSrc = '';
+  const state = $('load-state');
+  if (!state.textContent.includes('预览帧准备中')) state.textContent += '·预览帧准备中';
+  try {
+    const r = await api('/api/public/thumbs', {
+      method: 'POST',
+      body: JSON.stringify({ fileId: link.id, resourceKey: link.resourceKey })
+    });
+    if (seq !== thumbSeq || !publicMode) return;
+    thumbs = r;
+    await decodeThumbFrames(r, seq);
+    if (seq !== thumbSeq || !publicMode) return;
+    state.textContent = state.textContent.replace('·预览帧准备中', '');
+    if (!state.textContent.includes('预览帧就绪')) state.textContent += '·预览帧就绪';
+    state.className = 'ready';
+  } catch {
+    if (seq === thumbSeq && publicMode) state.textContent = state.textContent.replace('·预览帧准备中', '·预览帧生成失败');
+  }
+}
+
 function showScrubFrame(t) {
   if (!thumbs) return false;
   const raw = Math.min(thumbs.count, Math.max(1, Math.round(t * thumbs.fps) + 1));
@@ -336,6 +415,7 @@ let thumbsLoadingSeq = 0;
 function triggerLoadThumbs() {
   if (thumbsLoadingSeq === loadSeq) return;
   thumbsLoadingSeq = loadSeq;
+  if (publicMode && currentPublicLink) return loadPublicThumbs(currentPublicLink);
   const v = videos[curIdx];
   if (v) loadThumbs(v);
 }
@@ -509,6 +589,281 @@ async function deleteFolder(d) {
     toast('删除失败: ' + e.message, false);
   }
 }
+
+let movingFolder = null;
+let moveFolderDir = '';
+let moveFolderEntries = [];
+let moveFolderSeq = 0;
+
+function movingFolderPath() {
+  return movingFolder ? (movingFolder.parent ? `${movingFolder.parent}/${movingFolder.name}` : movingFolder.name) : '';
+}
+
+function closeMoveFolder() {
+  moveFolderSeq++;
+  movingFolder = null;
+  $('move-folder-modal').hidden = true;
+}
+
+function renderMoveFolderPicker() {
+  const crumbs = $('move-folder-crumbs');
+  crumbs.replaceChildren();
+  const addCrumb = (label, target) => {
+    if (crumbs.childNodes.length) crumbs.appendChild(document.createTextNode(' / '));
+    const link = document.createElement('a');
+    link.textContent = label;
+    link.onclick = () => loadMoveFolderDir(target);
+    crumbs.appendChild(link);
+  };
+  addCrumb('📁 根目录', '');
+  let acc = '';
+  for (const part of moveFolderDir ? moveFolderDir.split('/') : []) {
+    acc = acc ? `${acc}/${part}` : part;
+    addCrumb(part, acc);
+  }
+
+  const source = movingFolderPath();
+  const list = $('move-folder-list');
+  list.replaceChildren();
+  for (const entry of moveFolderEntries) {
+    const path = moveFolderDir ? `${moveFolderDir}/${entry.Name}` : entry.Name;
+    const button = document.createElement('button');
+    button.className = 'move-folder-entry';
+    button.textContent = '📁 ' + entry.Name;
+    button.disabled = path === source || path.startsWith(source + '/');
+    button.title = button.disabled ? '不能移入自身或子目录' : `打开「${entry.Name}」`;
+    button.onclick = () => loadMoveFolderDir(path);
+    list.appendChild(button);
+  }
+  if (!moveFolderEntries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'entry';
+    empty.textContent = '此处没有子文件夹';
+    list.appendChild(empty);
+  }
+
+  const sameParent = moveFolderDir === movingFolder.parent;
+  const insideSource = moveFolderDir === source || moveFolderDir.startsWith(source + '/');
+  const nameConflict = moveFolderEntries.some(entry => entry.Name === movingFolder.name);
+  const confirm = $('move-folder-confirm-btn');
+  confirm.disabled = sameParent || insideSource || nameConflict;
+  const status = $('move-folder-status');
+  status.className = confirm.disabled ? 'error' : '';
+  status.textContent = sameParent
+    ? '这里就是原位置'
+    : insideSource
+      ? '不能移入文件夹自身或它的子目录'
+      : nameConflict
+        ? `目标位置已有「${movingFolder.name}」`
+        : `将移动到：${moveFolderDir || '根目录'}`;
+}
+
+async function loadMoveFolderDir(path) {
+  if (!movingFolder) return;
+  const seq = ++moveFolderSeq;
+  moveFolderDir = path;
+  $('move-folder-list').textContent = '加载中…';
+  $('move-folder-status').textContent = '';
+  $('move-folder-confirm-btn').disabled = true;
+  try {
+    const listing = await api('/api/list?remote=' + encodeURIComponent(movingFolder.remote) + '&path=' + encodeURIComponent(path));
+    if (seq !== moveFolderSeq || !movingFolder) return;
+    moveFolderEntries = listing.entries.filter(entry => entry.IsDir).sort(sortCmp());
+    renderMoveFolderPicker();
+  } catch (e) {
+    if (seq !== moveFolderSeq || !movingFolder) return;
+    $('move-folder-list').textContent = '';
+    $('move-folder-status').className = 'error';
+    $('move-folder-status').textContent = '读取目录失败: ' + e.message;
+  }
+}
+
+function openMoveFolder(entry) {
+  movingFolder = {
+    name: entry.Name,
+    parent: curDir,
+    remote: curRemote.replace(/:$/, '')
+  };
+  $('move-folder-source').textContent = `选择「${entry.Name}」的新位置。文件夹名称保持不变。`;
+  $('move-folder-modal').hidden = false;
+  loadMoveFolderDir('');
+}
+
+$('move-folder-cancel-btn').onclick = closeMoveFolder;
+$('move-folder-confirm-btn').onclick = async () => {
+  if (!movingFolder) return;
+  const from = movingFolderPath();
+  const to = moveFolderDir ? `${moveFolderDir}/${movingFolder.name}` : movingFolder.name;
+  const name = movingFolder.name;
+  const remote = movingFolder.remote;
+  const button = $('move-folder-confirm-btn');
+  button.disabled = true;
+  $('move-folder-status').className = '';
+  $('move-folder-status').textContent = '移动中…';
+  try {
+    await api('/api/move', { method: 'POST', body: JSON.stringify({ remote, from, to, isDir: true }) });
+    closeMoveFolder();
+    await reloadKeepingCurrent();
+    toast(`已将「${name}」移动到「${moveFolderDir || '根目录'}」`, false);
+  } catch (e) {
+    $('move-folder-status').className = 'error';
+    $('move-folder-status').textContent = '移动失败: ' + e.message;
+    button.disabled = false;
+  }
+};
+
+let sharingFolder = null;
+let sharingData = null;
+let shareSeq = 0;
+
+function closeShareFolder() {
+  shareSeq++;
+  sharingFolder = null;
+  sharingData = null;
+  $('share-folder-modal').hidden = true;
+}
+
+function shareRoleLabel(role) {
+  return ({ owner: '所有者', organizer: '管理员', fileOrganizer: '内容管理员', writer: '编辑者', commenter: '评论者', reader: '查看者' })[role] || role;
+}
+
+function permissionLabel(permission) {
+  if (permission.type === 'anyone') return '🌐 知道链接的任何人';
+  if (permission.type === 'domain') return `🏢 ${permission.domain || permission.displayName || '组织'}`;
+  if (permission.type === 'group') return `👥 ${permission.emailAddress || permission.displayName || '群组'}`;
+  return `👤 ${permission.emailAddress || permission.displayName || '用户'}`;
+}
+
+function renderSharePermissions() {
+  if (!sharingFolder || !sharingData) return;
+  const canShare = !!sharingData.file?.capabilities?.canShare;
+  $('share-folder-title').textContent = `共享「${sharingData.file?.name || sharingFolder.name}」`;
+  const anyone = sharingData.permissions.find(permission => permission.type === 'anyone');
+  $('share-link-role').value = anyone?.role === 'writer' ? 'writer' : anyone ? 'reader' : 'restricted';
+  $('share-link-role').disabled = !canShare || !!anyone?.inherited;
+  $('share-link-apply-btn').disabled = !canShare || !!anyone?.inherited;
+  $('share-email').disabled = !canShare;
+  $('share-user-role').disabled = !canShare;
+  $('share-user-add-btn').disabled = !canShare;
+
+  const list = $('share-permission-list');
+  list.replaceChildren();
+  for (const permission of sharingData.permissions.filter(item => item.type !== 'anyone')) {
+    const row = document.createElement('div');
+    row.className = 'share-permission-row';
+    const identity = document.createElement('div');
+    identity.className = 'share-permission-identity';
+    identity.textContent = permissionLabel(permission);
+    if (permission.inherited) {
+      const inherited = document.createElement('small');
+      inherited.textContent = '继承自上级';
+      identity.appendChild(inherited);
+    }
+    row.appendChild(identity);
+    const fixed = permission.inherited || ['owner', 'organizer', 'fileOrganizer'].includes(permission.role) || !canShare;
+    if (fixed) {
+      const role = document.createElement('span');
+      role.className = 'share-fixed-role';
+      role.textContent = shareRoleLabel(permission.role);
+      row.appendChild(role);
+    } else {
+      const select = document.createElement('select');
+      for (const [value, label] of [['reader', '查看者'], ['commenter', '评论者'], ['writer', '编辑者']]) {
+        const option = document.createElement('option');
+        option.value = value; option.textContent = label; option.selected = permission.role === value;
+        select.appendChild(option);
+      }
+      select.onchange = () => changeSharePermission(permission, select.value);
+      row.appendChild(select);
+      const remove = document.createElement('button');
+      remove.textContent = '移除';
+      remove.className = 'share-remove-btn';
+      remove.onclick = () => removeSharePermission(permission);
+      row.appendChild(remove);
+    }
+    list.appendChild(row);
+  }
+  if (!sharingData.permissions.some(item => item.type !== 'anyone')) {
+    const empty = document.createElement('div');
+    empty.className = 'share-empty'; empty.textContent = '没有其他用户或组织权限'; list.appendChild(empty);
+  }
+  const status = $('share-folder-status');
+  status.className = canShare ? '' : 'error';
+  status.textContent = canShare
+    ? (anyone?.inherited ? '链接权限继承自上级，需要在权限来源处修改。' : '权限变更会立即同步到 Google Drive。')
+    : '当前账号只能查看权限，无权修改共享设置。';
+}
+
+async function loadSharePermissions() {
+  if (!sharingFolder) return;
+  const seq = ++shareSeq;
+  $('share-folder-loading').hidden = false;
+  $('share-folder-content').hidden = true;
+  $('share-folder-status').className = '';
+  $('share-folder-status').textContent = '';
+  try {
+    const data = await api('/api/folder-permissions?remote=' + encodeURIComponent(sharingFolder.remote) + '&fileId=' + encodeURIComponent(sharingFolder.id));
+    if (seq !== shareSeq || !sharingFolder) return;
+    sharingData = data;
+    $('share-folder-loading').hidden = true;
+    $('share-folder-content').hidden = false;
+    renderSharePermissions();
+  } catch (e) {
+    if (seq !== shareSeq || !sharingFolder) return;
+    $('share-folder-loading').textContent = '读取权限失败: ' + e.message;
+    $('share-folder-status').className = 'error';
+  }
+}
+
+function openShareFolder(entry) {
+  if (!entry.ID) return toast('这个文件夹没有可用的 Google Drive ID', false);
+  sharingFolder = { id: entry.ID, name: entry.Name, remote: curRemote.replace(/:$/, '') };
+  $('share-folder-modal').hidden = false;
+  $('share-folder-loading').textContent = '正在读取 Google Drive 权限…';
+  loadSharePermissions();
+}
+
+async function applyShareAction(payload) {
+  if (!sharingFolder) return;
+  $('share-folder-status').className = '';
+  $('share-folder-status').textContent = '正在同步到 Google Drive…';
+  for (const id of ['share-link-apply-btn', 'share-user-add-btn']) $(id).disabled = true;
+  try {
+    const data = await api('/api/folder-permissions', {
+      method: 'POST',
+      body: JSON.stringify({ remote: sharingFolder.remote, fileId: sharingFolder.id, ...payload })
+    });
+    sharingData = data.file ? data : await api('/api/folder-permissions?remote=' + encodeURIComponent(sharingFolder.remote) + '&fileId=' + encodeURIComponent(sharingFolder.id));
+    renderSharePermissions();
+    toast('共享权限已更新', false);
+  } catch (e) {
+    $('share-folder-status').className = 'error';
+    $('share-folder-status').textContent = '更新失败: ' + e.message;
+    renderSharePermissions();
+  }
+}
+
+async function changeSharePermission(permission, role) {
+  await applyShareAction({ action: 'update', permissionId: permission.id, role });
+}
+
+async function removeSharePermission(permission) {
+  if (!confirm(`移除「${permissionLabel(permission).slice(2)}」对这个文件夹的权限？`)) return;
+  await applyShareAction({ action: 'delete', permissionId: permission.id });
+}
+
+$('share-folder-close-btn').onclick = closeShareFolder;
+$('share-link-apply-btn').onclick = async () => {
+  const value = $('share-link-role').value;
+  if (value === 'writer' && !confirm('确实允许拿到链接的任何人编辑、上传和删除这个文件夹中的内容？')) return;
+  await applyShareAction({ action: 'set-link', role: value === 'restricted' ? null : value });
+};
+$('share-user-add-btn').onclick = async () => {
+  const email = $('share-email').value.trim();
+  if (!email) return toast('请输入邮箱地址', false);
+  await applyShareAction({ action: 'add-user', email, role: $('share-user-role').value });
+  $('share-email').value = '';
+};
 
 async function uploadFiles(files) {
   const remote = curRemote.replace(/:$/, '');
@@ -694,22 +1049,73 @@ function toast(msg, undoable) {
 function hideToast() { $('toast').style.display = 'none'; }
 
 // ---------- 快捷键 ----------
-const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+let arrowHold = null;
+
+function finishArrowHold(commitShort = true) {
+  const hold = arrowHold;
+  if (!hold) return;
+  arrowHold = null;
+  clearTimeout(hold.timer);
+  if (hold.interval) clearInterval(hold.interval);
+  $('speed').textContent = video.playbackRate.toFixed(1) + 'x';
+  $('scrub-overlay').style.display = 'none';
+  if (hold.active) {
+    if (hold.wasPlaying) video.play().catch(() => {});
+  } else if (commitShort && video.duration) {
+    chainSeek(video.currentTime + hold.direction * (hold.shiftKey ? 30 : 5));
+  }
+}
+
+function startArrowHold(key, shiftKey) {
+  if (!video.duration || arrowHold) return;
+  const direction = key === 'ArrowRight' ? 1 : -1;
+  const hold = {
+    key,
+    direction,
+    shiftKey,
+    active: false,
+    wasPlaying: !video.paused,
+    interval: null,
+    lastTick: 0,
+    timer: null
+  };
+  arrowHold = hold;
+  hold.timer = setTimeout(() => {
+    if (arrowHold !== hold) return;
+    hold.active = true;
+    video.pause();
+    hold.lastTick = performance.now();
+    const rate = Number($('hold-seek-rate').value) || 4;
+    $('speed').textContent = (direction > 0 ? '快进 ' : '倒退 ') + rate + '×';
+    hold.interval = setInterval(() => {
+      if (arrowHold !== hold) return;
+      const now = performance.now();
+      const elapsed = Math.min(0.25, (now - hold.lastTick) / 1000);
+      hold.lastTick = now;
+      const target = Math.min(video.duration, Math.max(0, video.currentTime + direction * rate * elapsed));
+      chainSeek(target);
+      showScrubFrame(target);
+    }, 50);
+  }, 1000);
+}
+
 document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return;
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) return;
   const k = e.key;
   if (k === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
-  else if (k === 'ArrowRight') { e.preventDefault(); chainSeek(video.currentTime + (e.shiftKey ? 30 : 5)); }
-  else if (k === 'ArrowLeft') { e.preventDefault(); chainSeek(video.currentTime - (e.shiftKey ? 30 : 5)); }
+  else if (k === 'ArrowRight' || k === 'ArrowLeft') {
+    e.preventDefault();
+    if (!e.repeat) startArrowHold(k, e.shiftKey);
+  }
   else if (k === ',') { video.pause(); chainSeek(Math.max(0, video.currentTime - FRAME)); }
   else if (k === '.') { video.pause(); chainSeek(video.currentTime + FRAME); }
-  else if (k === 'ArrowUp' || k === 'ArrowDown') {
+  else if (k === 'ArrowUp') {
     e.preventDefault();
-    let i = SPEEDS.indexOf(video.playbackRate);
-    if (i < 0) i = 2;
-    i = Math.min(SPEEDS.length - 1, Math.max(0, i + (k === 'ArrowUp' ? 1 : -1)));
-    video.playbackRate = SPEEDS[i];
-    $('speed').textContent = SPEEDS[i] + 'x';
+    if (!e.repeat) prev();
+  }
+  else if (k === 'ArrowDown') {
+    e.preventDefault();
+    if (!e.repeat) next();
   }
   else if (k === 'm' || k === 'M') { video.muted = !video.muted; $('mute-btn').textContent = video.muted ? '🔇' : '🔊'; }
   else if (k === 'g' || k === 'G') markOk();
@@ -717,6 +1123,13 @@ document.addEventListener('keydown', e => {
   else if (k === 'Enter') next();
   else if (k === 'p' || k === 'P') prev();
 });
+document.addEventListener('keyup', e => {
+  if (arrowHold && e.key === arrowHold.key) {
+    e.preventDefault();
+    finishArrowHold(true);
+  }
+});
+window.addEventListener('blur', () => finishArrowHold(false));
 
 $('play-btn').onclick = () => video.paused ? video.play() : video.pause();
 $('mute-btn').onclick = () => { video.muted = !video.muted; $('mute-btn').textContent = video.muted ? '🔇' : '🔊'; };
@@ -780,8 +1193,7 @@ async function loadRemotes() {
     opt.textContent = '请先添加账号';
     sel.appendChild(opt);
     $('list').textContent = '';
-    $('stats').textContent = '尚未连接 Google Drive';
-    showAccountModal(true);
+    $('stats').textContent = '尚未连接 Google Drive；也可在上方粘贴公开视频链接免登录播放';
     return false;
   }
   sel.disabled = false;
@@ -800,6 +1212,14 @@ async function loadRemotes() {
 }
 
 function stopPlayback() {
+  finishArrowHold(false);
+  publicMode = false;
+  currentPublicLink = null;
+  document.body.classList.remove('public-mode');
+  document.body.classList.remove('public-preview-mode');
+  $('public-preview').hidden = true;
+  $('public-preview').removeAttribute('src');
+  $('public-fallback-btn').hidden = true;
   video.pause();
   resetLoader();
   video.removeAttribute('src');
@@ -809,6 +1229,79 @@ function stopPlayback() {
   $('player-wrap').classList.remove('has-video');
   $('cur-name').textContent = '未选择视频';
 }
+
+function openPublicVideo(link) {
+  stopPlayback();
+  publicMode = true;
+  currentPublicLink = link;
+  document.body.classList.add('public-mode');
+  curDir = '';
+  dirs = [];
+  videos = [];
+  curIdx = -1;
+  $('crumbs').textContent = '🔗 公开链接（免登录·只读）';
+  $('list').innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'entry active';
+  row.innerHTML = '<span class="icon">🎬</span><span class="name"></span>';
+  row.querySelector('.name').textContent = 'Google Drive 公开视频';
+  $('list').appendChild(row);
+  $('stats').textContent = '免登录播放；链接必须设为「知道链接的任何人可查看」';
+  $('placeholder').style.display = 'none';
+  video.style.display = '';
+  $('player-wrap').classList.add('has-video');
+  resetLoader();
+  const key = link.resourceKey ? '?resourcekey=' + encodeURIComponent(link.resourceKey) : '';
+  video.src = '/public-stream/' + encodeURIComponent(link.id) + key;
+  video.play().catch(() => {});
+  startPublicFullLoad(link);
+  loadPublicThumbs(link);
+  $('cur-name').textContent = '公开 Drive 视频·只读模式';
+  $('link-paste-input').value = '';
+  showAccountModal(false);
+  toast('已用本地播放器打开公开视频，支持快进和倍速', false);
+}
+
+function openPublicPreviewFallback() {
+  if (!currentPublicLink) return;
+  video.pause();
+  video.style.display = 'none';
+  $('player-wrap').classList.remove('has-video');
+  document.body.classList.add('public-preview-mode');
+  const preview = $('public-preview');
+  preview.src = currentPublicLink.previewUrl;
+  preview.hidden = false;
+  $('public-fallback-btn').hidden = true;
+  $('load-state').textContent = '';
+}
+
+$('public-fallback-btn').onclick = openPublicPreviewFallback;
+async function diagnosePublicPlayback() {
+  try {
+    await api('/api/health');
+  } catch {
+    return '本地播放服务已断开，请关闭窗口后重新打开「视频检查器」';
+  }
+  try {
+    const response = await fetch(video.src, { headers: { Range: 'bytes=0-0' } });
+    if (response.ok) {
+      response.body?.cancel();
+      return 'Google 文件可读，但当前视频编码无法被 Chrome 播放';
+    }
+    const result = await response.json().catch(() => null);
+    return result?.error || `Google 文件请求失败（${response.status}）`;
+  } catch {
+    return '本地服务正常，但无法连接 Google Drive';
+  }
+}
+
+video.addEventListener('error', async () => {
+  if (!publicMode || document.body.classList.contains('public-preview-mode')) return;
+  $('public-fallback-btn').hidden = false;
+  const reason = await diagnosePublicPlayback();
+  if (!publicMode || document.body.classList.contains('public-preview-mode')) return;
+  toast('直连播放失败：' + reason + '；也可点「改用 Google 预览」', false);
+});
 
 $('remote-sel').onchange = async e => {
   if (!e.target.value) return;
@@ -828,6 +1321,7 @@ $('sort-sel').onchange = async e => {
 $('subdir').onchange = () => saveSettings({ subdir: $('subdir').value.trim() || '不合格' });
 $('ram-cache-gb').onchange = saveRamSettings;
 $('ram-video-gb').onchange = saveRamSettings;
+$('hold-seek-rate').onchange = () => saveSettings({ holdSeekRate: Number($('hold-seek-rate').value) });
 let ramSaveTimer;
 for (const id of ['ram-cache-gb', 'ram-video-gb']) {
   $(id).oninput = () => {
@@ -853,18 +1347,12 @@ $('link-btn').onclick = async () => {
   }
 };
 
-function parseDriveFolderId(input) {
-  input = input.trim();
-  let m = /\/folders\/([A-Za-z0-9_-]{10,100})/.exec(input);
-  if (m) return m[1];
-  m = /^[A-Za-z0-9_-]{10,100}$/.exec(input);
-  return m ? m[0] : null;
-}
-
 $('link-paste-btn').onclick = () => {
-  if (!curRemote) return toast('请先添加 Google Drive 账号', false);
-  const folderId = parseDriveFolderId($('link-paste-input').value);
-  if (!folderId) return toast('看不出这是个文件夹链接（单个文件的链接暂不支持）', false);
+  const link = DriveLink.parse($('link-paste-input').value);
+  if (!link) return toast('看不出这是有效的 Google Drive 文件夹或视频链接', false);
+  if (link.type === 'file') return openPublicVideo(link);
+  if (!curRemote) return toast('单个公开视频可免登录播放；打开整个文件夹仍需先添加账号', false);
+  const folderId = link.id;
   const value = curRemote.replace(/:$/, '').split(',')[0] + ',root_folder_id=' + folderId + ':';
   const sel = $('remote-sel');
   let opt = [...sel.options].find(o => o.value === value);
@@ -1065,6 +1553,7 @@ async function initialize() {
     $('subdir').value = settings.subdir || '不合格';
     $('ram-cache-gb').value = settings.ramCacheGb > 0 ? settings.ramCacheGb : '';
     $('ram-video-gb').value = settings.ramMaxVideoGb > 0 ? settings.ramMaxVideoGb : '';
+    $('hold-seek-rate').value = String([0.5, 1, 2, 4, 8, 16].includes(Number(settings.holdSeekRate)) ? Number(settings.holdSeekRate) : 4);
     await refreshRamStatus();
     if (await loadRemotes()) await loadDir('');
   } catch (error) {

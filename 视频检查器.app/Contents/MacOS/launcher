@@ -5,7 +5,7 @@ export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 DIR="$HOME/谷歌云盘视频检查器"
 URL="http://127.0.0.1:5572"
 BOOT="$HOME/Library/Logs/video-checker-boot.log"
-API_VERSION=2
+API_VERSION=10
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$BOOT"; }
 

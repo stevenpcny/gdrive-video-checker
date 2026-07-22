@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-src https://drive.google.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
 <title>谷歌云盘视频检查器</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
@@ -15,8 +15,8 @@
     <input type="file" id="config-file" accept=".conf,text/plain" hidden>
   </div>
   <div id="link-bar">
-    <input id="link-paste-input" placeholder="粘贴别人给的 Drive 文件夹链接">
-    <button id="link-paste-btn" title="打开「任何知道链接的人可查看/编辑」的 Drive 文件夹">打开链接</button>
+    <input id="link-paste-input" placeholder="粘贴 Drive 文件夹或视频链接">
+    <button id="link-paste-btn" title="公开视频可免登录播放；文件夹使用当前账号打开">打开链接</button>
   </div>
   <div id="crumbs"></div>
   <div id="sort-bar">排序
@@ -37,6 +37,19 @@
       <label>RAM 缓存 <input id="ram-cache-gb" type="number" min="1" step="0.5" placeholder="自动"> GB</label>
       <label>单视频 <input id="ram-video-gb" type="number" min="0.1" step="0.1" placeholder="自动"> GB</label>
     </div>
+    <div class="cfg-row key-row">
+      <label>长按 ←/→ 速度
+        <select id="hold-seek-rate">
+          <option value="0.5">0.5×</option>
+          <option value="1">1×</option>
+          <option value="2">2×</option>
+          <option value="4" selected>4×</option>
+          <option value="8">8×</option>
+          <option value="16">16×</option>
+        </select>
+      </label>
+      <span>↑ 上一个·↓ 下一个</span>
+    </div>
     <div id="ram-hint"></div>
   </div>
 </div>
@@ -44,11 +57,12 @@
   <div id="player-wrap">
     <div id="placeholder">
       在左侧选择包含视频的文件夹<br><br>
-      <kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> 跳5秒　<kbd>Shift+←/→</kbd> 跳30秒　<kbd>,</kbd>/<kbd>.</kbd> 逐帧<br>
-      <kbd>↑</kbd>/<kbd>↓</kbd> 倍速　<kbd>M</kbd> 静音　<kbd>G</kbd> 合格并下一个　<kbd>B</kbd> 不合格并下一个<br>
+      <kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> 短按跳5秒·长按连续扫描　<kbd>Shift+←/→</kbd> 跳30秒　<kbd>,</kbd>/<kbd>.</kbd> 逐帧<br>
+      <kbd>↑</kbd>/<kbd>↓</kbd> 上/下一个视频　<kbd>M</kbd> 静音　<kbd>G</kbd> 合格并下一个　<kbd>B</kbd> 不合格并下一个<br>
       <kbd>Enter</kbd> 下一个　<kbd>P</kbd> 上一个　拖动进度条可逐帧看画面
     </div>
     <video id="video" preload="auto" style="display:none"></video>
+    <iframe id="public-preview" title="Google Drive 公开视频播放器" allow="autoplay; fullscreen" allowfullscreen hidden></iframe>
     <img id="scrub-overlay" alt="">
     <button id="prev-btn" class="ov-nav" title="P">‹</button>
     <button id="next-btn" class="ov-nav" title="Enter">›</button>
@@ -70,6 +84,7 @@
   <div id="bar">
     <button id="play-btn" title="空格">▶</button>
     <span id="cur-name">未选择视频</span>
+    <button id="public-fallback-btn" hidden>改用 Google 预览</button>
     <span id="speed">1.0x</span>
     <button id="mute-btn" title="M">🔊</button>
     <button id="prev-folder-btn" title="按当前排序跳到父文件夹里的上一个文件夹">◂ 上一个文件夹</button>
@@ -108,6 +123,59 @@
   </div>
 </div>
 
+<div id="move-folder-modal" class="modal" hidden>
+  <div class="modal-card move-folder-card">
+    <h2>移动文件夹</h2>
+    <p id="move-folder-source"></p>
+    <div id="move-folder-crumbs"></div>
+    <div id="move-folder-list"></div>
+    <div id="move-folder-status" role="status"></div>
+    <div class="modal-buttons">
+      <button id="move-folder-cancel-btn">取消</button>
+      <button id="move-folder-confirm-btn">移动到此处</button>
+    </div>
+  </div>
+</div>
+
+<div id="share-folder-modal" class="modal" hidden>
+  <div class="modal-card share-folder-card">
+    <h2 id="share-folder-title">共享文件夹</h2>
+    <p id="share-folder-loading">正在读取 Google Drive 权限…</p>
+    <div id="share-folder-content" hidden>
+      <section class="share-section">
+        <label for="share-link-role">链接访问</label>
+        <div class="share-control-row">
+          <select id="share-link-role">
+            <option value="restricted">受限</option>
+            <option value="reader">知道链接的任何人可查看</option>
+            <option value="writer">知道链接的任何人可编辑</option>
+          </select>
+          <button id="share-link-apply-btn">应用</button>
+        </div>
+      </section>
+      <section class="share-section">
+        <label>添加用户</label>
+        <div class="share-control-row">
+          <input id="share-email" type="email" placeholder="name@example.com">
+          <select id="share-user-role">
+            <option value="reader">查看者</option>
+            <option value="commenter">评论者</option>
+            <option value="writer">编辑者</option>
+          </select>
+          <button id="share-user-add-btn">添加</button>
+        </div>
+      </section>
+      <section class="share-section">
+        <label>已有权限</label>
+        <div id="share-permission-list"></div>
+      </section>
+    </div>
+    <div id="share-folder-status" role="status"></div>
+    <div class="modal-buttons"><button id="share-folder-close-btn">关闭</button></div>
+  </div>
+</div>
+
+<script src="/drive-link.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
