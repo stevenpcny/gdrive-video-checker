@@ -2,6 +2,7 @@ const VIDEO_EXT = new Set(['mp4','mov','m4v','mkv','webm','avi','ts','mts','flv'
 const MAX_DECODED_THUMBS = 600;
 const FRAME = 1 / 30;
 const DESKTOP = window.videoCheckerDesktop || null;
+const { makeItem: makeBatchItem, validateMoveTarget } = window.BatchOps;
 const AUTO_FIT_WINDOW = !!DESKTOP || new URLSearchParams(location.search).has('standalone');
 const $ = id => document.getElementById(id);
 const video = $('video');
@@ -15,6 +16,8 @@ let lastMove = null;
 let fitWindowSeq = 0;
 let publicMode = false;
 let currentPublicLink = null;
+const selectedKeys = new Set();
+let batchBusy = false;
 
 // 整片预载状态
 let loadSeq = 0;
@@ -52,6 +55,7 @@ function showListMessage(text, isError = false) {
 async function loadDir(p) {
   const seq = ++loadDirSeq;
   clearTimeout(warmTimer);
+  selectedKeys.clear();
   curDir = p; curIdx = -1;
   showListMessage('加载中…');
   try {
@@ -92,8 +96,9 @@ async function warmChildDirectories(seq) {
   await Promise.all([worker(), worker()]);
 }
 
-// ---------- RAM 预热: 只保留当前、下一个、上一个 ----------
+// ---------- RAM 预热: 沿当前列表顺序缓存后续视频 ----------
 const cachedSet = new Set(); // markKey -> 已预热
+const PREFETCH_AHEAD_COUNT = 8;
 let prefetchSeq = 0;
 
 async function prefetchAround(center) {
@@ -101,8 +106,12 @@ async function prefetchAround(center) {
   cachedSet.clear();
   render();
   const remote = curRemote.replace(/:$/, '');
-  const queue = [center, center + 1, center - 1]
-    .filter((i, pos, all) => i >= 0 && i < videos.length && all.indexOf(i) === pos)
+  // videos 已按界面选中的排序方式排列；+1 永远代表用户接下来会看到的视频。
+  // 当前视频由 startFullLoad 优先缓存，这里同时从下一个开始顺序预热，最后保留前一个供回看。
+  const indexes = Array.from({ length: PREFETCH_AHEAD_COUNT }, (_, offset) => center + offset + 1);
+  indexes.push(center - 1);
+  const queue = indexes
+    .filter(i => i >= 0 && i < videos.length)
     .map(i => ({ path: pathOf(videos[i]), key: markKey(videos[i]), size: videos[i].Size }));
   for (const item of queue) {
     if (seq !== prefetchSeq) return;
@@ -136,6 +145,53 @@ function applySort() {
   if (curName) curIdx = videos.findIndex(v => v.Name === curName);
 }
 
+function availableBatchItems() {
+  return [
+    ...dirs.map(entry => makeBatchItem(entry, true, curDir)),
+    ...videos.filter(entry => !entry.movedTo).map(entry => makeBatchItem(entry, false, curDir))
+  ];
+}
+
+function selectedBatchItems() {
+  return availableBatchItems().filter(item => selectedKeys.has(item.key));
+}
+
+function updateBatchBar() {
+  const available = availableBatchItems();
+  const selected = selectedBatchItems();
+  const allSelected = available.length > 0 && selected.length === available.length;
+  const selectAll = $('select-all');
+  selectAll.checked = allSelected;
+  selectAll.indeterminate = selected.length > 0 && !allSelected;
+  selectAll.disabled = batchBusy || !available.length;
+  document.querySelectorAll('.entry-select').forEach(checkbox => { checkbox.disabled = batchBusy; });
+  $('selected-count').textContent = selected.length ? `已选 ${selected.length} 项` : '未选择';
+  $('batch-move-btn').disabled = batchBusy || !selected.length;
+  $('batch-delete-btn').disabled = batchBusy || !selected.length;
+}
+
+function setBatchBusy(busy, message = '') {
+  batchBusy = busy;
+  updateBatchBar();
+  if (message) $('selected-count').textContent = message;
+}
+
+function addSelectionControl(el, item) {
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'entry-select';
+  checkbox.checked = selectedKeys.has(item.key);
+  checkbox.title = `选择「${item.name}」`;
+  checkbox.onclick = event => event.stopPropagation();
+  checkbox.onchange = () => {
+    if (checkbox.checked) selectedKeys.add(item.key);
+    else selectedKeys.delete(item.key);
+    render();
+  };
+  el.prepend(checkbox);
+  el.classList.toggle('selected', checkbox.checked);
+}
+
 function render() {
   const parts = curDir ? curDir.split('/') : [];
   const crumbs = $('crumbs');
@@ -157,6 +213,7 @@ function render() {
   const list = $('list');
   list.innerHTML = '';
   for (const d of dirs) {
+    const item = makeBatchItem(d, true, curDir);
     const el = document.createElement('div');
     el.className = 'entry';
     el.innerHTML = `<span class="icon">📁</span><span class="name"></span>` +
@@ -167,6 +224,7 @@ function render() {
     el.querySelector('.act-move').onclick = e => { e.stopPropagation(); openMoveFolder(d); };
     el.querySelector('.act-rename').onclick = e => { e.stopPropagation(); renameEntry(d, true); };
     el.querySelector('.act-del').onclick = e => { e.stopPropagation(); deleteFolder(d); };
+    addSelectionControl(el, item);
     list.appendChild(el);
   }
   videos.forEach((v, i) => {
@@ -181,6 +239,7 @@ function render() {
     el.querySelector('.name').textContent = v.Name;
     el.onclick = () => play(i);
     if (!v.movedTo) {
+      addSelectionControl(el, makeBatchItem(v, false, curDir));
       el.querySelector('.act-rename').onclick = e => { e.stopPropagation(); renameEntry(v, false); };
       el.querySelector('.act-del').onclick = e => { e.stopPropagation(); deleteVideo(v); };
     }
@@ -190,6 +249,7 @@ function render() {
   const done = videos.filter(v => v.movedTo || marks[markKey(v)]).length;
   $('stats').textContent = videos.length ? `视频 ${videos.length} 个 · 已检查 ${done} 个` : '此文件夹没有视频';
   $('folder-done-btn').style.display = videos.length && done === videos.length ? 'block' : 'none';
+  updateBatchBar();
 }
 
 function updateNavHitAreas() {
@@ -590,19 +650,17 @@ async function deleteFolder(d) {
   }
 }
 
-let movingFolder = null;
+let movingItems = [];
 let moveFolderDir = '';
 let moveFolderEntries = [];
+let moveFolderAllEntries = [];
 let moveFolderSeq = 0;
-
-function movingFolderPath() {
-  return movingFolder ? (movingFolder.parent ? `${movingFolder.parent}/${movingFolder.name}` : movingFolder.name) : '';
-}
 
 function closeMoveFolder() {
   moveFolderSeq++;
-  movingFolder = null;
+  movingItems = [];
   $('move-folder-modal').hidden = true;
+  setBatchBusy(false);
 }
 
 function renderMoveFolderPicker() {
@@ -622,7 +680,7 @@ function renderMoveFolderPicker() {
     addCrumb(part, acc);
   }
 
-  const source = movingFolderPath();
+  const sourceFolders = movingItems.filter(item => item.isDir).map(item => item.path);
   const list = $('move-folder-list');
   list.replaceChildren();
   for (const entry of moveFolderEntries) {
@@ -630,7 +688,7 @@ function renderMoveFolderPicker() {
     const button = document.createElement('button');
     button.className = 'move-folder-entry';
     button.textContent = '📁 ' + entry.Name;
-    button.disabled = path === source || path.startsWith(source + '/');
+    button.disabled = sourceFolders.some(source => path === source || path.startsWith(source + '/'));
     button.title = button.disabled ? '不能移入自身或子目录' : `打开「${entry.Name}」`;
     button.onclick = () => loadMoveFolderDir(path);
     list.appendChild(button);
@@ -642,74 +700,150 @@ function renderMoveFolderPicker() {
     list.appendChild(empty);
   }
 
-  const sameParent = moveFolderDir === movingFolder.parent;
-  const insideSource = moveFolderDir === source || moveFolderDir.startsWith(source + '/');
-  const nameConflict = moveFolderEntries.some(entry => entry.Name === movingFolder.name);
+  const error = validateMoveTarget(movingItems, moveFolderDir, moveFolderAllEntries);
   const confirm = $('move-folder-confirm-btn');
-  confirm.disabled = sameParent || insideSource || nameConflict;
+  confirm.disabled = !!error;
   const status = $('move-folder-status');
-  status.className = confirm.disabled ? 'error' : '';
-  status.textContent = sameParent
-    ? '这里就是原位置'
-    : insideSource
-      ? '不能移入文件夹自身或它的子目录'
-      : nameConflict
-        ? `目标位置已有「${movingFolder.name}」`
-        : `将移动到：${moveFolderDir || '根目录'}`;
+  status.className = error ? 'error' : '';
+  status.textContent = error || `将 ${movingItems.length} 项移动到：${moveFolderDir || '根目录'}`;
 }
 
 async function loadMoveFolderDir(path) {
-  if (!movingFolder) return;
+  if (!movingItems.length) return;
   const seq = ++moveFolderSeq;
   moveFolderDir = path;
   $('move-folder-list').textContent = '加载中…';
   $('move-folder-status').textContent = '';
   $('move-folder-confirm-btn').disabled = true;
   try {
-    const listing = await api('/api/list?remote=' + encodeURIComponent(movingFolder.remote) + '&path=' + encodeURIComponent(path));
-    if (seq !== moveFolderSeq || !movingFolder) return;
+    const listing = await api('/api/list?remote=' + encodeURIComponent(movingItems[0].remote) + '&path=' + encodeURIComponent(path));
+    if (seq !== moveFolderSeq || !movingItems.length) return;
+    moveFolderAllEntries = listing.entries;
     moveFolderEntries = listing.entries.filter(entry => entry.IsDir).sort(sortCmp());
     renderMoveFolderPicker();
   } catch (e) {
-    if (seq !== moveFolderSeq || !movingFolder) return;
+    if (seq !== moveFolderSeq || !movingItems.length) return;
     $('move-folder-list').textContent = '';
     $('move-folder-status').className = 'error';
     $('move-folder-status').textContent = '读取目录失败: ' + e.message;
   }
 }
 
-function openMoveFolder(entry) {
-  movingFolder = {
-    name: entry.Name,
-    parent: curDir,
-    remote: curRemote.replace(/:$/, '')
-  };
-  $('move-folder-source').textContent = `选择「${entry.Name}」的新位置。文件夹名称保持不变。`;
+function openMoveItems(items) {
+  if (!items.length) return;
+  const remote = curRemote.replace(/:$/, '');
+  movingItems = items.map(item => ({ ...item, remote }));
+  const names = movingItems.slice(0, 3).map(item => `「${item.name}」`).join('、');
+  const more = movingItems.length > 3 ? ` 等 ${movingItems.length} 项` : '';
+  $('move-folder-source').textContent = `为 ${names}${more} 选择新位置，名称保持不变。`;
   $('move-folder-modal').hidden = false;
+  setBatchBusy(true);
   loadMoveFolderDir('');
+}
+
+function openMoveFolder(entry) {
+  openMoveItems([makeBatchItem(entry, true, curDir)]);
 }
 
 $('move-folder-cancel-btn').onclick = closeMoveFolder;
 $('move-folder-confirm-btn').onclick = async () => {
-  if (!movingFolder) return;
-  const from = movingFolderPath();
-  const to = moveFolderDir ? `${moveFolderDir}/${movingFolder.name}` : movingFolder.name;
-  const name = movingFolder.name;
-  const remote = movingFolder.remote;
+  if (!movingItems.length) return;
+  const items = movingItems.slice();
+  const remote = items[0].remote;
   const button = $('move-folder-confirm-btn');
   button.disabled = true;
   $('move-folder-status').className = '';
-  $('move-folder-status').textContent = '移动中…';
-  try {
-    await api('/api/move', { method: 'POST', body: JSON.stringify({ remote, from, to, isDir: true }) });
+  const failures = [];
+  const warnings = [];
+  let success = 0;
+  let movedCurrent = false;
+  for (const [index, item] of items.entries()) {
+    $('move-folder-status').textContent = `正在移动 ${index + 1}/${items.length}：${item.name}`;
+    const to = moveFolderDir ? `${moveFolderDir}/${item.name}` : item.name;
+    try {
+      await api('/api/move', { method: 'POST', body: JSON.stringify({ remote, from: item.path, to, isDir: item.isDir }) });
+      success++;
+      if (!item.isDir) {
+        const fromMark = `${remote}:${item.path}`;
+        const toMark = `${remote}:${to}`;
+        if (marks[fromMark]) {
+          try {
+            await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: toMark, status: marks[fromMark].status }) });
+            await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: fromMark, status: null }) });
+          } catch (error) {
+            warnings.push(`${item.name}的检查标记未同步（${error.message}）`);
+          }
+        }
+        if (curIdx >= 0 && videos[curIdx] === item.entry) movedCurrent = true;
+      }
+    } catch (error) {
+      failures.push({ ...item, error: error.message });
+    }
+  }
+  if (movedCurrent) stopPlayback();
+  await reloadKeepingCurrent(movedCurrent ? null : undefined);
+  if (!failures.length) {
     closeMoveFolder();
-    await reloadKeepingCurrent();
-    toast(`已将「${name}」移动到「${moveFolderDir || '根目录'}」`, false);
-  } catch (e) {
+    const warningText = warnings.length ? `；${warnings.join('；')}` : '';
+    toast(`已将 ${success} 项移动到「${moveFolderDir || '根目录'}」${warningText}`, false);
+  } else {
+    movingItems = failures;
+    for (const item of failures) selectedKeys.add(item.key);
+    render();
     $('move-folder-status').className = 'error';
-    $('move-folder-status').textContent = '移动失败: ' + e.message;
+    $('move-folder-status').textContent = `已移动 ${success} 项，${failures.length} 项失败：` + failures.map(item => `${item.name}（${item.error}）`).join('；');
     button.disabled = false;
   }
+};
+
+$('select-all').onchange = event => {
+  const items = availableBatchItems();
+  if (event.target.checked) items.forEach(item => selectedKeys.add(item.key));
+  else selectedKeys.clear();
+  render();
+};
+
+$('batch-move-btn').onclick = () => openMoveItems(selectedBatchItems());
+
+$('batch-delete-btn').onclick = async () => {
+  const items = selectedBatchItems();
+  if (!items.length) return;
+  const folderCount = items.filter(item => item.isDir).length;
+  const videoCount = items.length - folderCount;
+  const detail = [folderCount && `${folderCount} 个文件夹`, videoCount && `${videoCount} 个视频`].filter(Boolean).join('、');
+  if (!confirm(`删除所选 ${detail}？\n\n文件夹中的全部内容也会删除。项目会移入 Google Drive 回收站，可在云端硬盘「回收站」恢复。`)) return;
+
+  setBatchBusy(true, `正在删除 0/${items.length}`);
+  const remote = curRemote.replace(/:$/, '');
+  const failures = [];
+  const warnings = [];
+  let success = 0;
+  let deletedCurrent = false;
+  for (const [index, item] of items.entries()) {
+    setBatchBusy(true, `正在删除 ${index + 1}/${items.length}：${item.name}`);
+    try {
+      await api('/api/delete', { method: 'POST', body: JSON.stringify({ remote, path: item.path, isDir: item.isDir }) });
+      success++;
+      if (!item.isDir && marks[`${remote}:${item.path}`]) {
+        try {
+          await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: `${remote}:${item.path}`, status: null }) });
+        } catch (error) {
+          warnings.push(`${item.name}的检查标记未清理（${error.message}）`);
+        }
+      }
+      if (!item.isDir && curIdx >= 0 && videos[curIdx] === item.entry) deletedCurrent = true;
+    } catch (error) {
+      failures.push({ ...item, error: error.message });
+    }
+  }
+  if (deletedCurrent) stopPlayback();
+  await reloadKeepingCurrent(deletedCurrent ? null : undefined);
+  for (const item of failures) selectedKeys.add(item.key);
+  setBatchBusy(false);
+  render();
+  const failureText = failures.length ? `，${failures.length} 项失败：${failures.map(item => `${item.name}（${item.error}）`).join('；')}` : '';
+  const warningText = warnings.length ? `；${warnings.join('；')}` : '';
+  toast(`已删除 ${success} 项${failureText}${warningText}（Drive 回收站可恢复）`, false);
 };
 
 let sharingFolder = null;
@@ -1057,10 +1191,12 @@ function finishArrowHold(commitShort = true) {
   arrowHold = null;
   clearTimeout(hold.timer);
   if (hold.interval) clearInterval(hold.interval);
-  $('speed').textContent = video.playbackRate.toFixed(1) + 'x';
+  video.playbackRate = hold.originalPlaybackRate;
+  $('speed').textContent = hold.originalPlaybackRate.toFixed(1) + 'x';
   $('scrub-overlay').style.display = 'none';
   if (hold.active) {
     if (hold.wasPlaying) video.play().catch(() => {});
+    else video.pause();
   } else if (commitShort && video.duration) {
     chainSeek(video.currentTime + hold.direction * (hold.shiftKey ? 30 : 5));
   }
@@ -1075,6 +1211,7 @@ function startArrowHold(key, shiftKey) {
     shiftKey,
     active: false,
     wasPlaying: !video.paused,
+    originalPlaybackRate: video.playbackRate,
     interval: null,
     lastTick: 0,
     timer: null
@@ -1083,10 +1220,18 @@ function startArrowHold(key, shiftKey) {
   hold.timer = setTimeout(() => {
     if (arrowHold !== hold) return;
     hold.active = true;
-    video.pause();
-    hold.lastTick = performance.now();
     const rate = Number($('hold-seek-rate').value) || 4;
     $('speed').textContent = (direction > 0 ? '快进 ' : '倒退 ') + rate + '×';
+    if (direction > 0) {
+      // 向前扫描使用浏览器的真实倍速播放，让连续动作始终可见；高倍速下允许解码自然降帧。
+      $('scrub-overlay').style.display = 'none';
+      video.playbackRate = rate;
+      video.play().catch(() => {});
+      return;
+    }
+    // 浏览器不支持负播放速度，倒退继续用高频 seek + 预览帧。
+    video.pause();
+    hold.lastTick = performance.now();
     hold.interval = setInterval(() => {
       if (arrowHold !== hold) return;
       const now = performance.now();
@@ -1316,6 +1461,7 @@ $('sort-sel').onchange = async e => {
   await saveSettings({ sortMode });
   applySort();
   render();
+  if (curIdx >= 0) prefetchAround(curIdx);
 };
 
 $('subdir').onchange = () => saveSettings({ subdir: $('subdir').value.trim() || '不合格' });

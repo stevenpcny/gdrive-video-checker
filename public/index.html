@@ -29,6 +29,12 @@
     <input type="file" id="upload-file" accept="video/*" multiple hidden>
     <button id="link-btn" title="复制当前文件夹的 Google Drive 链接">🔗 复制链接</button>
   </div>
+  <div id="batch-bar">
+    <label><input id="select-all" type="checkbox"> 全选</label>
+    <span id="selected-count">未选择</span>
+    <button id="batch-move-btn" disabled>⇲ 移动</button>
+    <button id="batch-delete-btn" disabled>🗑 删除</button>
+  </div>
   <div id="list"></div>
   <div id="stats"></div>
   <div id="cfg">
@@ -125,7 +131,7 @@
 
 <div id="move-folder-modal" class="modal" hidden>
   <div class="modal-card move-folder-card">
-    <h2>移动文件夹</h2>
+    <h2>移动所选项目</h2>
     <p id="move-folder-source"></p>
     <div id="move-folder-crumbs"></div>
     <div id="move-folder-list"></div>
@@ -176,6 +182,7 @@
 </div>
 
 <script src="/drive-link.js"></script>
+<script src="/batch-ops.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

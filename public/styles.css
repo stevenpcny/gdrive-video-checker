@@ -20,11 +20,18 @@
   #sort-bar { padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
   #sort-bar select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 2px 6px; font-size: 12px; }
   #sort-bar button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
+  #batch-bar { padding: 6px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 7px; font-size: 12px; }
+  #batch-bar label { display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+  #selected-count { flex: 1; color: var(--dim); white-space: nowrap; }
+  #batch-bar button { padding: 3px 8px; font-size: 12px; }
+  #batch-delete-btn:not(:disabled) { color: #ff8b82; }
   #list { flex: 1; overflow-y: auto; }
   .entry { padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #22252b; }
   .entry:hover { background: #262a31; }
   .entry.error-row { color: var(--bad); }
   .entry.active { background: #2b3a55; }
+  .entry.selected { background: #25344f; }
+  .entry-select { flex: none; width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
   .entry .icon { flex: none; width: 18px; text-align: center; }
   .entry .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .entry .badge { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 8px; color: #fff; }
@@ -59,7 +66,8 @@
   body.public-mode #prev-folder-btn,
   body.public-mode #next-folder-btn,
   body.public-mode #copy-result-btn,
-  body.public-mode #sort-bar { display: none; }
+  body.public-mode #sort-bar,
+  body.public-mode #batch-bar { display: none; }
   body.public-mode #cfg .cfg-row:first-child { display: none; }
   body.public-mode #player-wrap .ov-nav,
   body.public-mode #player-wrap #ov-marks,
@@ -113,7 +121,7 @@
   button:hover { background: #363b44; }
   button.ok { background: var(--ok); border-color: var(--ok); }
   button.bad { background: var(--bad); border-color: var(--bad); }
-  #toast { position: fixed; bottom: 88px; left: 50%; transform: translateX(-50%); max-width: min(640px, calc(100vw - 32px)); background: #2c3038; border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; display: none; align-items: center; gap: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.5); z-index: 200; }
+  #toast { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); max-width: min(640px, calc(100% - 32px)); background: #2c3038; border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; display: none; align-items: center; gap: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.5); z-index: 200; }
   #toast button { padding: 3px 12px; }
   [hidden] { display: none !important; }
   .modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.72); }
