@@ -23,13 +23,16 @@ function appendLog(file, message) {
   fs.appendFileSync(file, `${new Date().toISOString()} ${message}\n`);
 }
 
+const RUNTIME_DIRS = {
+  darwin: { arm64: 'darwin-arm64', x64: 'darwin-x64' },
+  win32: { x64: 'win32-x64' }
+};
+
 function runtimeBinary(name) {
-  const archDir = process.arch === 'arm64' ? 'darwin-arm64'
-    : process.arch === 'x64' ? 'darwin-x64'
-      : null;
-  if (!archDir) throw new Error(`不支持的 CPU 架构: ${process.arch}`);
+  const archDir = RUNTIME_DIRS[process.platform]?.[process.arch];
+  if (!archDir) throw new Error(`不支持的平台: ${process.platform} ${process.arch}`);
   const base = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', 'vendor');
-  const file = path.join(base, app.isPackaged ? 'bin' : 'bin', archDir, name);
+  const file = path.join(base, 'bin', archDir, process.platform === 'win32' ? `${name}.exe` : name);
   if (!fs.existsSync(file)) throw new Error(`应用安装不完整，缺少 ${name}`);
   return file;
 }

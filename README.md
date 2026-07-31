@@ -99,13 +99,26 @@ npm run release:local
 - 从 FFmpeg 8.1 官方源码构建 LGPL-only x86_64/arm64 二进制。
 - 生成 ad-hoc 签名 Universal 应用、DMG、ZIP、SHA-256 和构建 manifest。
 
+构建 Windows x64 免安装 ZIP（可在 macOS 上交叉构建）：
+
+```bash
+npm run release:win
+```
+
+Windows 构建说明：
+
+- 目标为 x64 免安装 ZIP，解压后运行 `视频检查器.exe`；不生成安装程序（NSIS 在 macOS 上需要 Wine）。
+- rclone 1.73.2 与 FFmpeg 8.1.2 使用官方/BtbN 预编译 Windows 二进制（LGPL-only 变体），下载后按固定 SHA-256 校验。
+- 未签名，Windows SmartScreen 首次运行会提示"未知发布者"。
+- 交叉构建无法验证运行时行为，`verify:release:win` 只做产物结构与 PE 架构静态校验，发布前需在 Windows 上实测。
+
 ## 架构
 
 - `electron/main.js`：Electron 生命周期、安全 BrowserWindow、动态端口、窗口尺寸和内置工具定位。
 - `server.js`：可嵌入 HTTP 服务、Google Drive API 工作流、Range 视频流、缓存、缩略图和 rclone 子进程管理。
 - `public/`：无 Node 权限的 renderer UI；通过带随机 token 的 loopback 服务访问后端。
-- `vendor/bin/darwin-{x64,arm64}/`：包内 rclone/ffmpeg。
-- `scripts/`：双架构资源准备、FFmpeg 构建和发布验证。
+- `vendor/bin/darwin-{x64,arm64}/`、`vendor/bin/win32-x64/`：包内 rclone/ffmpeg，按平台分目录，打包时只带入目标平台的一份。
+- `scripts/`：双架构资源准备、FFmpeg 构建、Windows 资源准备和发布验证。
 
 关闭主窗口会退出应用，并终止 rclone/ffmpeg 子进程和本地监听端口。
 

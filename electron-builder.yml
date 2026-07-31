@@ -12,17 +12,23 @@ files:
   - package.json
   - '!public/__resize_probe.html'
 
+# 平台专属二进制放在各自的 mac/win 段里，避免把另一平台的 rclone/ffmpeg 打进包。
 extraResources:
-  - from: vendor/bin
-    to: bin
-    filter:
-      - '**/*'
   - from: licenses
     to: licenses
     filter:
       - '**/*'
 
 mac:
+  extraResources:
+    - from: vendor/bin/darwin-x64
+      to: bin/darwin-x64
+      filter:
+        - '**/*'
+    - from: vendor/bin/darwin-arm64
+      to: bin/darwin-arm64
+      filter:
+        - '**/*'
   icon: build/icon.icns
   category: public.app-category.utilities
   minimumSystemVersion: '15.0'
@@ -36,6 +42,18 @@ mac:
     - target: zip
       arch:
         - universal
+
+win:
+  extraResources:
+    - from: vendor/bin/win32-x64
+      to: bin/win32-x64
+      filter:
+        - '**/*'
+  icon: build/icon.png
+  target:
+    - target: zip
+      arch:
+        - x64
 
 artifactName: '${productName}-${version}-${arch}.${ext}'
 

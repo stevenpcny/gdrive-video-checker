@@ -10,10 +10,14 @@
     "start": "electron .",
     "test": "node --test",
     "vendor:prepare": "node scripts/prepare-vendor.mjs",
+    "vendor:prepare:win": "node scripts/prepare-vendor-win.mjs",
     "ffmpeg:build": "bash scripts/build-ffmpeg.sh",
     "build:universal": "npm run vendor:prepare && npm run ffmpeg:build && electron-builder --mac --universal",
+    "build:win": "npm run vendor:prepare:win && electron-builder --win --x64",
     "verify:release": "node scripts/verify-release.mjs",
-    "release:local": "npm run build:universal && npm run verify:release"
+    "verify:release:win": "node scripts/verify-release-win.mjs",
+    "release:local": "npm run build:universal && npm run verify:release",
+    "release:win": "npm run build:win && npm run verify:release:win"
   },
   "devDependencies": {
     "electron": "43.1.0",
