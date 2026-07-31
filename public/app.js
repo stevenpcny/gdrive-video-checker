@@ -533,7 +533,18 @@ seekbar.addEventListener('pointerdown', e => {
 seekbar.addEventListener('pointermove', e => {
   if (dragging) onDragMove(e.clientX);
 });
-seekbar.addEventListener('pointerup', e => {
+let resumeSeq = 0;
+function resumePlay() {
+  const seq = ++resumeSeq;
+  video.play().catch(() => { if (seq === resumeSeq && !dragging) video.play().catch(() => {}); });
+  // 看门狗: 流播模式下 seek 到未缓冲位置的数据请求可能挂起，重设 currentTime 促使浏览器重新拉数据。
+  setTimeout(() => {
+    if (seq !== resumeSeq || dragging || video.paused) return;
+    if (video.seeking && video.readyState < 3) video.currentTime = video.currentTime;
+  }, 3000);
+}
+
+function endDrag() {
   if (!dragging) return;
   dragging = false;
   if (dragSeekRaf) { cancelAnimationFrame(dragSeekRaf); dragSeekRaf = 0; }
@@ -546,8 +557,12 @@ seekbar.addEventListener('pointerup', e => {
   const hideOverlay = () => { $('scrub-overlay').style.display = 'none'; };
   video.addEventListener('seeked', hideOverlay, { once: true });
   setTimeout(hideOverlay, 500);
-  if (!wasPausedBeforeDrag) video.play().catch(() => {});
-});
+  if (!wasPausedBeforeDrag) resumePlay();
+}
+seekbar.addEventListener('pointerup', endDrag);
+// 拖动被系统打断(触控板手势/指针捕获丢失)时不会有 pointerup，必须同样收尾，否则视频永久停在暂停态。
+seekbar.addEventListener('pointercancel', endDrag);
+seekbar.addEventListener('lostpointercapture', endDrag);
 
 function showTip(clientX) {
   const tip = $('seek-tip');
