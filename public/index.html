@@ -2,112 +2,21 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-src https://drive.google.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
 <title>谷歌云盘视频检查器</title>
-<style>
-  :root {
-    --bg: #14161a; --panel: #1d2026; --border: #2c3038;
-    --text: #e8eaed; --dim: #9aa0a6; --accent: #4c8dff;
-    --ok: #34a853; --bad: #ea4335;
-  }
-  * { box-sizing: border-box; margin: 0; }
-  body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "PingFang SC", sans-serif; height: 100vh; display: flex; overflow: hidden; }
-
-  /* 左栏 */
-  #sidebar { width: 340px; min-width: 260px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  #remote-bar { display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  #remote-sel { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 4px 8px; font-size: 13px; }
-  #link-bar { display: flex; gap: 6px; padding: 0 12px 8px; border-bottom: 1px solid var(--border); }
-  #link-paste-input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 4px 8px; font-size: 12px; min-width: 0; }
-  #link-bar button { padding: 4px 10px; font-size: 12px; white-space: nowrap; }
-  #remote-bar button { padding: 4px 10px; font-size: 12px; white-space: nowrap; }
-  #crumbs { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; word-break: break-all; }
-  #crumbs a { color: var(--accent); cursor: pointer; text-decoration: none; }
-  #crumbs a:hover { text-decoration: underline; }
-  #sort-bar { padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
-  #sort-bar select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 2px 6px; font-size: 12px; }
-  #sort-bar button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
-  #list { flex: 1; overflow-y: auto; }
-  .entry { padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #22252b; }
-  .entry:hover { background: #262a31; }
-  .entry.active { background: #2b3a55; }
-  .entry .icon { flex: none; width: 18px; text-align: center; }
-  .entry .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .entry .badge { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 8px; color: #fff; }
-  .entry .cache-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #3a3f48; }
-  .entry .cache-dot.cached { background: var(--ok); }
-  .entry .actions { flex: none; display: none; gap: 2px; }
-  .entry:hover .actions { display: flex; }
-  .entry .actions span { cursor: pointer; opacity: .65; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
-  .entry .actions span:hover { opacity: 1; background: #3a3f48; }
-  .entry.badrow .name { color: var(--bad); text-decoration: line-through; opacity: .85; }
-  .badge.ok { background: var(--ok); } .badge.bad { background: var(--bad); }
-  #stats { padding: 8px 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--dim); }
-  #cfg { padding: 8px 12px; border-top: 1px solid var(--border); font-size: 12px; display: flex; align-items: center; gap: 6px; }
-  #cfg input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 8px; font-size: 12px; }
-
-  /* 右栏 */
-  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #player-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; min-height: 0; position: relative; }
-  video { max-width: 100%; max-height: 100%; outline: none; }
-  #scrub-overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; display: none; }
-
-  /* 画面浮动控件 */
-  .ov-nav { position: absolute; top: 0; bottom: 0; width: 76px;
-    font-size: 38px; line-height: 1; color: #fff; background: transparent; border: none;
-    cursor: pointer; display: none; opacity: .45; z-index: 4; padding: 0; }
-  #prev-btn { left: 0; }
-  #next-btn { right: 0; }
-  #prev-btn:hover { opacity: 1; background: linear-gradient(to right, rgba(0,0,0,.55), transparent); }
-  #next-btn:hover { opacity: 1; background: linear-gradient(to left, rgba(0,0,0,.55), transparent); }
-  #ov-marks { position: absolute; left: 50%; transform: translateX(-50%); bottom: 20px;
-    display: none; gap: 16px; z-index: 5; opacity: .85; }
-  #ov-marks:hover { opacity: 1; }
-  /* 文件夹全部检查完时，画面中央的大按钮 */
-  #folder-done-btn { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-    display: none; z-index: 6; font-size: 17px; padding: 16px 32px; border-radius: 12px;
-    background: var(--ok); border-color: var(--ok); box-shadow: 0 4px 20px rgba(0,0,0,.6); }
-  #ov-marks:hover { opacity: 1; }
-  #ov-marks button { padding: 10px 28px; font-size: 15px; border-radius: 10px; white-space: nowrap;
-    box-shadow: 0 2px 12px rgba(0,0,0,.55); backdrop-filter: blur(4px); }
-  #player-wrap.has-video .ov-nav { display: block; }
-  #player-wrap.has-video #ov-marks { display: flex; }
-  #placeholder { color: var(--dim); text-align: center; line-height: 2.2; }
-  kbd { background: #2c3038; border: 1px solid #444; border-radius: 4px; padding: 1px 7px; font-size: 12px; font-family: inherit; }
-
-  /* 进度条 */
-  #seek-area { background: var(--panel); padding: 10px 16px 2px; user-select: none; }
-  #seekbar { position: relative; height: 26px; cursor: pointer; touch-action: none; }
-  #seek-track { position: absolute; left: 0; right: 0; top: 9px; height: 8px; border-radius: 4px; background: #33373f; overflow: hidden; }
-  #seek-buffered { position: absolute; top: 0; bottom: 0; left: 0; background: #4a5160; width: 0; }
-  #seek-played { position: absolute; top: 0; bottom: 0; left: 0; background: var(--accent); width: 0; }
-  #seek-handle { position: absolute; top: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.6); margin-left: -10px; left: 0; }
-  #seekbar.dragging #seek-handle { transform: scale(1.25); }
-  #seek-tip { position: absolute; bottom: 30px; transform: translateX(-50%); background: #000c; padding: 2px 8px; border-radius: 4px; font-size: 12px; display: none; pointer-events: none; }
-  #seek-info { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); padding: 2px 2px 6px; }
-
-  #bar { padding: 8px 16px 10px; background: var(--panel); border-top: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  #cur-name { flex: 1; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-  #speed { color: var(--dim); font-size: 12px; min-width: 42px; }
-  #load-state { color: var(--dim); font-size: 12px; }
-  #load-state.ready { color: var(--ok); }
-  button { background: #2c3038; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
-  button:hover { background: #363b44; }
-  button.ok { background: var(--ok); border-color: var(--ok); }
-  button.bad { background: var(--bad); border-color: var(--bad); }
-  #toast { position: absolute; bottom: 88px; left: 50%; transform: translateX(-50%); background: #2c3038; border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; display: none; align-items: center; gap: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.5); z-index: 10; }
-  #toast button { padding: 3px 12px; }
-</style>
+<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <div id="sidebar">
   <div id="remote-bar">
     <select id="remote-sel"></select>
-    <button id="import-btn" title="导入服务账号密钥 JSON，添加另一个谷歌云盘">＋导入</button>
+    <button id="import-btn" title="添加或导入 Google Drive 账号">＋账号</button>
     <input type="file" id="import-file" accept=".json,application/json" hidden>
+    <input type="file" id="config-file" accept=".conf,text/plain" hidden>
   </div>
   <div id="link-bar">
-    <input id="link-paste-input" placeholder="粘贴别人给的 Drive 文件夹链接">
-    <button id="link-paste-btn" title="打开「任何知道链接的人可查看/编辑」的 Drive 文件夹">打开链接</button>
+    <input id="link-paste-input" placeholder="粘贴 Drive 文件夹或视频链接">
+    <button id="link-paste-btn" title="公开视频可免登录播放；文件夹使用当前账号打开">打开链接</button>
   </div>
   <div id="crumbs"></div>
   <div id="sort-bar">排序
@@ -120,19 +29,46 @@
     <input type="file" id="upload-file" accept="video/*" multiple hidden>
     <button id="link-btn" title="复制当前文件夹的 Google Drive 链接">🔗 复制链接</button>
   </div>
+  <div id="batch-bar">
+    <label><input id="select-all" type="checkbox"> 全选</label>
+    <span id="selected-count">未选择</span>
+    <button id="batch-move-btn" disabled>⇲ 移动</button>
+    <button id="batch-delete-btn" disabled>🗑 删除</button>
+  </div>
   <div id="list"></div>
   <div id="stats"></div>
-  <div id="cfg">不合格移入子文件夹：<input id="subdir" value="不合格"></div>
+  <div id="cfg">
+    <div class="cfg-row">不合格移入子文件夹：<input id="subdir" value="不合格"></div>
+    <div class="cfg-row ram-row">
+      <label>RAM 缓存 <input id="ram-cache-gb" type="number" min="1" step="0.5" placeholder="自动"> GB</label>
+      <label>单视频 <input id="ram-video-gb" type="number" min="0.1" step="0.1" placeholder="自动"> GB</label>
+    </div>
+    <div class="cfg-row key-row">
+      <label>长按 ←/→ 速度
+        <select id="hold-seek-rate">
+          <option value="0.5">0.5×</option>
+          <option value="1">1×</option>
+          <option value="2">2×</option>
+          <option value="4" selected>4×</option>
+          <option value="8">8×</option>
+          <option value="16">16×</option>
+        </select>
+      </label>
+      <span>↑ 上一个·↓ 下一个</span>
+    </div>
+    <div id="ram-hint"></div>
+  </div>
 </div>
 <div id="main">
   <div id="player-wrap">
     <div id="placeholder">
       在左侧选择包含视频的文件夹<br><br>
-      <kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> 跳5秒　<kbd>Shift+←/→</kbd> 跳30秒　<kbd>,</kbd>/<kbd>.</kbd> 逐帧<br>
-      <kbd>↑</kbd>/<kbd>↓</kbd> 倍速　<kbd>M</kbd> 静音　<kbd>G</kbd> 合格并下一个　<kbd>B</kbd> 不合格并下一个<br>
+      <kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> 短按跳5秒·长按连续扫描　<kbd>Shift+←/→</kbd> 跳30秒　<kbd>,</kbd>/<kbd>.</kbd> 逐帧<br>
+      <kbd>↑</kbd>/<kbd>↓</kbd> 上/下一个视频　<kbd>M</kbd> 静音　<kbd>G</kbd> 合格并下一个　<kbd>B</kbd> 不合格并下一个<br>
       <kbd>Enter</kbd> 下一个　<kbd>P</kbd> 上一个　拖动进度条可逐帧看画面
     </div>
     <video id="video" preload="auto" style="display:none"></video>
+    <iframe id="public-preview" title="Google Drive 公开视频播放器" allow="autoplay; fullscreen" allowfullscreen hidden></iframe>
     <img id="scrub-overlay" alt="">
     <button id="prev-btn" class="ov-nav" title="P">‹</button>
     <button id="next-btn" class="ov-nav" title="Enter">›</button>
@@ -154,6 +90,7 @@
   <div id="bar">
     <button id="play-btn" title="空格">▶</button>
     <span id="cur-name">未选择视频</span>
+    <button id="public-fallback-btn" hidden>改用 Google 预览</button>
     <span id="speed">1.0x</span>
     <button id="mute-btn" title="M">🔊</button>
     <button id="prev-folder-btn" title="按当前排序跳到父文件夹里的上一个文件夹">◂ 上一个文件夹</button>
@@ -162,733 +99,90 @@
   </div>
 </div>
 
-<script>
-const VIDEO_EXT = new Set(['mp4','mov','m4v','mkv','webm','avi','ts','mts','flv','wmv','3gp']);
-const FULL_LOAD_LIMIT = 500e6;  // 超过 500MB 不整片预载，纯流式
-const FRAME = 1 / 30;
-const $ = id => document.getElementById(id);
-const video = $('video');
+<div id="account-modal" class="modal" hidden>
+  <div class="modal-card">
+    <h2>连接 Google Drive</h2>
+    <p>账号配置只保存在这台 Mac 的 Application Support 中。</p>
+    <div id="account-choices" class="account-actions">
+      <button id="service-account-btn"><b>服务账号 JSON</b><br><small>导入管理员提供的 service_account 密钥</small></button>
+      <button id="rclone-config-btn"><b>导入 rclone.conf</b><br><small>复制并验证已有的 rclone 配置文件</small></button>
+      <button id="oauth-btn"><b>Google OAuth</b><br><small>读取 Google Cloud JSON，再在浏览器登录</small></button>
+    </div>
+    <div id="oauth-panel" hidden>
+      <div class="form-row"><label>账号名称</label><input id="oauth-name" value="gdrive" maxlength="32"></div>
+      <div class="form-row"><label>Client ID（可选）</label><input id="oauth-client-id"></div>
+      <div class="form-row"><label>Client Secret（可选）</label><input id="oauth-client-secret" type="password"></div>
+      <button id="oauth-json-btn">读取 Google Cloud OAuth JSON</button>
+      <div id="oauth-json-status" role="status"></div>
+      <button id="oauth-start-btn">开始配置</button>
+      <div id="oauth-question" hidden></div>
+      <div id="oauth-answer-row" class="form-row" hidden>
+        <label id="oauth-answer-label">回答</label>
+        <div id="oauth-answer-control"></div>
+      </div>
+      <div class="modal-buttons" id="oauth-step-buttons" hidden>
+        <button id="oauth-cancel-btn">取消配置</button>
+        <button id="oauth-continue-btn">继续</button>
+      </div>
+    </div>
+    <div class="modal-buttons"><button id="account-close-btn">关闭</button></div>
+  </div>
+</div>
 
-let curDir = '';
-let dirs = [];
-let videos = [];
-let curIdx = -1;
-let marks = {};
-let lastMove = null;
+<div id="move-folder-modal" class="modal" hidden>
+  <div class="modal-card move-folder-card">
+    <h2>移动所选项目</h2>
+    <p id="move-folder-source"></p>
+    <div id="move-folder-crumbs"></div>
+    <div id="move-folder-list"></div>
+    <div id="move-folder-status" role="status"></div>
+    <div class="modal-buttons">
+      <button id="move-folder-cancel-btn">取消</button>
+      <button id="move-folder-confirm-btn">移动到此处</button>
+    </div>
+  </div>
+</div>
 
-// 整片预载状态
-let loadCtl = null;      // AbortController
-let blobUrl = null;
-let pendingBlob = null;  // 拖动中不换源，拖完再换
+<div id="share-folder-modal" class="modal" hidden>
+  <div class="modal-card share-folder-card">
+    <h2 id="share-folder-title">共享文件夹</h2>
+    <p id="share-folder-loading">正在读取 Google Drive 权限…</p>
+    <div id="share-folder-content" hidden>
+      <section class="share-section">
+        <label for="share-link-role">链接访问</label>
+        <div class="share-control-row">
+          <select id="share-link-role">
+            <option value="restricted">受限</option>
+            <option value="reader">知道链接的任何人可查看</option>
+            <option value="writer">知道链接的任何人可编辑</option>
+          </select>
+          <button id="share-link-apply-btn">应用</button>
+        </div>
+      </section>
+      <section class="share-section">
+        <label>添加用户</label>
+        <div class="share-control-row">
+          <input id="share-email" type="email" placeholder="name@example.com">
+          <select id="share-user-role">
+            <option value="reader">查看者</option>
+            <option value="commenter">评论者</option>
+            <option value="writer">编辑者</option>
+          </select>
+          <button id="share-user-add-btn">添加</button>
+        </div>
+      </section>
+      <section class="share-section">
+        <label>已有权限</label>
+        <div id="share-permission-list"></div>
+      </section>
+    </div>
+    <div id="share-folder-status" role="status"></div>
+    <div class="modal-buttons"><button id="share-folder-close-btn">关闭</button></div>
+  </div>
+</div>
 
-let curRemote = '';    // 当前账号(rclone remote 名，含冒号)
-
-const isVideo = name => VIDEO_EXT.has(name.split('.').pop().toLowerCase());
-const encPath = p => p.split('/').map(encodeURIComponent).join('/');
-const keyOf = v => (curDir ? curDir + '/' : '') + v.Name;
-const pathOf = v => v.movedTo || keyOf(v); // 不合格已移入子文件夹的，用新路径播放
-const markKey = v => curRemote + keyOf(v); // 标记按账号隔离
-const streamUrl = (remote, p) => '/stream/' + encodeURIComponent(remote.replace(/:$/, '')) + '/' + encPath(p);
-const fmt = s => { s = Math.max(0, s | 0); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
-
-async function api(path, opts) {
-  const r = await fetch(path, opts);
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || r.status);
-  return data;
-}
-
-let loadDirSeq = 0; // 防止先发出的慢响应覆盖后点的文件夹
-
-async function loadDir(p) {
-  const seq = ++loadDirSeq;
-  curDir = p; curIdx = -1;
-  $('list').innerHTML = '<div class="entry">加载中…</div>';
-  try {
-    const [listing, m] = await Promise.all([
-      api('/api/list?remote=' + encodeURIComponent(curRemote.replace(/:$/, '')) + '&path=' + encodeURIComponent(p)),
-      api('/api/marks'),
-    ]);
-    if (seq !== loadDirSeq) return;
-    marks = m;
-    dirs = listing.entries.filter(e => e.IsDir);
-    videos = listing.entries.filter(e => !e.IsDir && isVideo(e.Name));
-    applySort();
-    render();
-    prefetchFolder();
-  } catch (e) {
-    if (seq === loadDirSeq) $('list').innerHTML = `<div class="entry" style="color:var(--bad)">加载失败: ${e.message}</div>`;
-  }
-}
-
-// ---------- 文件夹预热: 后台按列表顺序把视频拉进服务器磁盘缓存 ----------
-const cachedSet = new Set(); // markKey -> 已预热
-let prefetchSeq = 0;
-
-async function prefetchFolder() {
-  const seq = ++prefetchSeq;
-  const remote = curRemote.replace(/:$/, '');
-  const queue = videos.map(v => ({ path: keyOf(v), key: markKey(v), size: v.Size })); // 按当前列表顺序(序号小→大)
-  for (let pass = 0; pass < 3; pass++) { // 失败的下一轮重试补齐
-    let failed = false;
-    for (const item of queue) {
-      if (seq !== prefetchSeq) return; // 已切换文件夹/账号
-      if (cachedSet.has(item.key)) continue;
-      try {
-        await api('/api/prefetch', { method: 'POST', body: JSON.stringify({ remote, path: item.path, size: item.size }) });
-        if (seq !== prefetchSeq) return;
-        cachedSet.add(item.key);
-        render();
-      } catch { failed = true; }
-    }
-    if (!failed) return;
-    await new Promise(r => setTimeout(r, 2000));
-  }
-}
-
-let sortMode = localStorage.getItem('sortMode') || 'name';
-
-function sortCmp() {
-  return sortMode === 'name'
-    ? (a, b) => a.Name.localeCompare(b.Name, 'zh', { numeric: true })
-    : sortMode === 'new'
-      ? (a, b) => b.ModTime.localeCompare(a.ModTime)
-      : (a, b) => a.ModTime.localeCompare(b.ModTime);
-}
-
-function applySort() {
-  const cmp = sortCmp();
-  dirs.sort(cmp);
-  const curName = curIdx >= 0 ? videos[curIdx].Name : null;
-  videos.sort(cmp);
-  if (curName) curIdx = videos.findIndex(v => v.Name === curName);
-}
-
-function render() {
-  const parts = curDir ? curDir.split('/') : [];
-  let html = '<a data-p="">📁 根目录</a>';
-  let acc = '';
-  for (const part of parts) {
-    acc = acc ? acc + '/' + part : part;
-    html += ` / <a data-p="${acc}">${part}</a>`;
-  }
-  $('crumbs').innerHTML = html;
-  $('crumbs').querySelectorAll('a').forEach(a => a.onclick = () => loadDir(a.dataset.p));
-
-  const list = $('list');
-  list.innerHTML = '';
-  for (const d of dirs) {
-    const el = document.createElement('div');
-    el.className = 'entry';
-    el.innerHTML = `<span class="icon">📁</span><span class="name"></span>` +
-      `<span class="actions"><span class="act-rename" title="重命名文件夹">✎</span><span class="act-del" title="删除文件夹（含内容）">🗑</span></span>`;
-    el.querySelector('.name').textContent = d.Name;
-    el.onclick = () => loadDir((curDir ? curDir + '/' : '') + d.Name);
-    el.querySelector('.act-rename').onclick = e => { e.stopPropagation(); renameEntry(d, true); };
-    el.querySelector('.act-del').onclick = e => { e.stopPropagation(); deleteFolder(d); };
-    list.appendChild(el);
-  }
-  videos.forEach((v, i) => {
-    const el = document.createElement('div');
-    el.className = 'entry' + (i === curIdx ? ' active' : '') + (v.movedTo ? ' badrow' : '');
-    el.dataset.idx = i;
-    const mark = v.movedTo ? { status: 'bad' } : marks[markKey(v)];
-    el.innerHTML = `<span class="icon">🎬</span><span class="name"></span>` +
-      (mark ? `<span class="badge ${mark.status}">${mark.status === 'ok' ? '合格' : '不合格'}</span>` : '') +
-      `<span class="cache-dot${cachedSet.has(markKey(v)) ? ' cached' : ''}" title="绿点=已预热，秒开"></span>` +
-      (v.movedTo ? '' : `<span class="actions"><span class="act-rename" title="重命名视频">✎</span><span class="act-del" title="删除视频">🗑</span></span>`);
-    el.querySelector('.name').textContent = v.Name;
-    el.onclick = () => play(i);
-    if (!v.movedTo) {
-      el.querySelector('.act-rename').onclick = e => { e.stopPropagation(); renameEntry(v, false); };
-      el.querySelector('.act-del').onclick = e => { e.stopPropagation(); deleteVideo(v); };
-    }
-    list.appendChild(el);
-  });
-
-  const done = videos.filter(v => v.movedTo || marks[markKey(v)]).length;
-  $('stats').textContent = videos.length ? `视频 ${videos.length} 个 · 已检查 ${done} 个` : '此文件夹没有视频';
-  $('folder-done-btn').style.display = videos.length && done === videos.length ? 'block' : 'none';
-}
-
-function play(i) {
-  if (i < 0 || i >= videos.length) return;
-  curIdx = i;
-  const v = videos[i];
-  $('placeholder').style.display = 'none';
-  video.style.display = '';
-  $('player-wrap').classList.add('has-video');
-  resetLoader();
-  video.src = streamUrl(curRemote, pathOf(v));
-  video.play().catch(() => {});
-  $('cur-name').textContent = `[${i + 1}/${videos.length}] ${v.Name}`;
-  render();
-  document.querySelector(`.entry[data-idx="${i}"]`)?.scrollIntoView({ block: 'nearest' });
-  startFullLoad(v);
-  loadThumbs(v);
-}
-
-// ---------- 整片预载: 载完换 blob 源，拖动即本地瞬时 seek ----------
-function resetLoader() {
-  if (loadCtl) { loadCtl.abort(); loadCtl = null; }
-  if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
-  pendingBlob = null;
-  $('scrub-overlay').style.display = 'none';
-  $('load-state').textContent = '';
-  $('load-state').className = '';
-}
-
-async function startFullLoad(v) {
-  if (v.Size > FULL_LOAD_LIMIT) { $('load-state').textContent = '文件过大，流式播放'; return; }
-  loadCtl = new AbortController();
-  const myCtl = loadCtl;
-  const stateEl = $('load-state');
-  try {
-    const r = await fetch(streamUrl(curRemote, pathOf(v)), { signal: myCtl.signal });
-    if (!r.ok) throw new Error(r.status);
-    const reader = r.body.getReader();
-    const chunks = [];
-    let got = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      got += value.length;
-      if (v.Size) stateEl.textContent = `预载 ${Math.round(got / v.Size * 100)}%`;
-    }
-    if (myCtl !== loadCtl) return; // 已切到别的视频
-    const blob = new Blob(chunks, { type: 'video/mp4' });
-    if (dragging) { pendingBlob = blob; return; }
-    swapToBlob(blob);
-  } catch (e) {
-    if (myCtl === loadCtl) stateEl.textContent = '';
-  }
-}
-
-function swapToBlob(blob) {
-  const t = video.currentTime, paused = video.paused, rate = video.playbackRate;
-  blobUrl = URL.createObjectURL(blob);
-  video.src = blobUrl;
-  video.currentTime = t;
-  video.playbackRate = rate;
-  if (!paused) video.play().catch(() => {});
-  const el = $('load-state');
-  el.textContent = '✓ 已全载·拖动零延迟';
-  el.className = 'ready';
-}
-
-// ---------- 缩略帧条: 拖动时即时显示预解码画面 ----------
-let thumbs = null;      // {base, fps, count}
-let thumbSeq = 0;       // 防止切视频后旧结果写回
-
-async function loadThumbs(v) {
-  const seq = ++thumbSeq;
-  thumbs = null;
-  try {
-    const r = await api('/api/thumbs', { method: 'POST', body: JSON.stringify({ remote: curRemote.replace(/:$/, ''), path: pathOf(v) }) });
-    if (seq !== thumbSeq) return;
-    thumbs = r;
-    // 预热浏览器缓存
-    for (let i = 1; i <= r.count; i++) { const img = new Image(); img.src = r.base + String(i).padStart(5, '0') + '.jpg'; }
-    $('load-state').textContent += '·帧预览就绪';
-  } catch { /* 无 ffmpeg 或生成失败: 退回实时 seek 刷擦 */ }
-}
-
-function showScrubFrame(t) {
-  if (!thumbs) return false;
-  const n = Math.min(thumbs.count, Math.max(1, Math.round(t * thumbs.fps) + 1));
-  const ov = $('scrub-overlay');
-  ov.src = thumbs.base + String(n).padStart(5, '0') + '.jpg';
-  ov.style.display = 'block';
-  return true;
-}
-
-// ---------- 自定义进度条: 连环 seek 拖动刷擦 ----------
-const seekbar = $('seekbar');
-let dragging = false;
-let wasPausedBeforeDrag = false;
-let pendingSeek = null;
-
-function chainSeek(t) {
-  if (video.seeking) pendingSeek = t;
-  else video.currentTime = t;
-}
-video.addEventListener('seeked', () => {
-  if (pendingSeek !== null) { const t = pendingSeek; pendingSeek = null; video.currentTime = t; }
-});
-
-function barTime(clientX) {
-  const rect = seekbar.getBoundingClientRect();
-  const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-  return frac * (video.duration || 0);
-}
-
-let dragTarget = 0; // 手指的精确位置，松手时落到这里
-
-function onDragMove(clientX) {
-  dragTarget = barTime(clientX);
-  // 有缩略帧: 零延迟画面；没有: 实时 seek 刷擦(约4-5帧/秒)
-  if (!showScrubFrame(dragTarget)) chainSeek(dragTarget);
-  showTip(clientX);
-}
-
-seekbar.addEventListener('pointerdown', e => {
-  if (!video.duration) return;
-  dragging = true;
-  wasPausedBeforeDrag = video.paused;
-  video.pause();
-  seekbar.classList.add('dragging');
-  seekbar.setPointerCapture(e.pointerId);
-  onDragMove(e.clientX);
-});
-seekbar.addEventListener('pointermove', e => {
-  if (dragging) onDragMove(e.clientX);
-});
-seekbar.addEventListener('pointerup', e => {
-  if (!dragging) return;
-  dragging = false;
-  pendingSeek = null;
-  seekbar.classList.remove('dragging');
-  $('seek-tip').style.display = 'none';
-  chainSeek(dragTarget); // 松手: 精确定位
-  video.addEventListener('seeked', () => { $('scrub-overlay').style.display = 'none'; }, { once: true });
-  if (pendingBlob) { const b = pendingBlob; pendingBlob = null; swapToBlob(b); }
-  if (!wasPausedBeforeDrag) video.play().catch(() => {});
-});
-
-function showTip(clientX) {
-  const tip = $('seek-tip');
-  const rect = seekbar.getBoundingClientRect();
-  tip.style.display = 'block';
-  tip.style.left = (clientX - rect.left) + 'px';
-  tip.textContent = fmt(barTime(clientX));
-}
-
-function updateBar() {
-  const d = video.duration || 0;
-  const frac = d ? (dragging ? dragTarget : video.currentTime) / d : 0;
-  $('seek-played').style.width = (frac * 100) + '%';
-  $('seek-handle').style.left = (frac * 100) + '%';
-  $('time-cur').textContent = fmt(video.currentTime);
-  $('time-dur').textContent = fmt(d);
-  let buf = 0;
-  for (let i = 0; i < video.buffered.length; i++) buf = Math.max(buf, video.buffered.end(i));
-  $('seek-buffered').style.width = (d ? buf / d * 100 : 0) + '%';
-  requestAnimationFrame(updateBar);
-}
-requestAnimationFrame(updateBar);
-
-video.addEventListener('play', () => $('play-btn').textContent = '⏸');
-video.addEventListener('pause', () => $('play-btn').textContent = '▶');
-video.addEventListener('click', () => video.paused ? video.play() : video.pause());
-
-// ---------- 重命名 / 删除 / 上传 ----------
-// 变更后重载当前目录，并按名字复位正在播放的视频(不打断播放)。activeName 显式指定复位目标
-async function reloadKeepingCurrent(activeName) {
-  const playingName = activeName !== undefined ? activeName : (curIdx >= 0 ? videos[curIdx].Name : null);
-  await loadDir(curDir);
-  if (playingName) {
-    const i = videos.findIndex(v => v.Name === playingName);
-    if (i >= 0) {
-      curIdx = i;
-      render();
-      document.querySelector(`.entry[data-idx="${i}"]`)?.scrollIntoView({ block: 'nearest' });
-    }
-  }
-}
-
-async function renameEntry(entry, isDir) {
-  const oldName = entry.Name;
-  const input = prompt(`重命名${isDir ? '文件夹' : '视频'}：`, oldName);
-  if (input === null) return;
-  const newName = input.trim();
-  if (!newName || newName === oldName) return;
-  if (newName.includes('/')) return toast('名字里不能有斜杠', false);
-  if ([...dirs, ...videos].some(e => e !== entry && e.Name === newName)) return toast(`「${newName}」已存在`, false);
-  const remote = curRemote.replace(/:$/, '');
-  const base = curDir ? curDir + '/' : '';
-  const from = base + oldName, to = base + newName;
-  const wasCurrent = !isDir && curIdx >= 0 && videos[curIdx] === entry;
-  try {
-    await api('/api/rename', { method: 'POST', body: JSON.stringify({ remote, from, to }) });
-    // 迁移文件标记(marks 以路径为 key，不迁会失联；文件夹内子项标记无法批量迁，属既有限制)
-    if (!isDir && marks[curRemote + from]) {
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + to, status: marks[curRemote + from].status }) });
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + from, status: null }) });
-    }
-    await reloadKeepingCurrent(wasCurrent ? newName : undefined);
-    toast(`已重命名为「${newName}」`, false);
-  } catch (e) {
-    toast('重命名失败: ' + e.message, false);
-  }
-}
-
-async function deleteVideo(v) {
-  if (!confirm(`删除「${v.Name}」？\n\n文件会移入 Google Drive 回收站，可在云端硬盘「回收站」里恢复。`)) return;
-  const remote = curRemote.replace(/:$/, '');
-  const p = keyOf(v);
-  const wasCurrent = curIdx >= 0 && videos[curIdx] === v;
-  try {
-    await api('/api/delete', { method: 'POST', body: JSON.stringify({ remote, path: p }) });
-    if (marks[curRemote + p]) await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + p, status: null }) });
-    if (wasCurrent) stopPlayback();
-    await reloadKeepingCurrent(wasCurrent ? null : undefined);
-    toast(`已删除「${v.Name}」（Drive 回收站可恢复）`, false);
-  } catch (e) {
-    toast('删除失败: ' + e.message, false);
-  }
-}
-
-async function deleteFolder(d) {
-  if (!confirm(`删除文件夹「${d.Name}」及其中全部内容？\n\n会移入 Google Drive 回收站，可在云端硬盘「回收站」里恢复。`)) return;
-  const remote = curRemote.replace(/:$/, '');
-  const p = (curDir ? curDir + '/' : '') + d.Name;
-  try {
-    await api('/api/delete', { method: 'POST', body: JSON.stringify({ remote, path: p, isDir: true }) });
-    await reloadKeepingCurrent();
-    toast(`已删除文件夹「${d.Name}」（Drive 回收站可恢复）`, false);
-  } catch (e) {
-    toast('删除失败: ' + e.message, false);
-  }
-}
-
-async function uploadFiles(files) {
-  const remote = curRemote.replace(/:$/, '');
-  const base = curDir ? curDir + '/' : '';
-  const existing = new Set([...dirs, ...videos].map(e => e.Name));
-  let done = 0, fail = 0;
-  for (let n = 0; n < files.length; n++) {
-    const f = files[n];
-    if (existing.has(f.name)) { toast(`「${f.name}」已存在，跳过`, false); fail++; continue; }
-    const id = Math.random().toString(36).slice(2);
-    const label = `上传中 ${n + 1}/${files.length}：${f.name}`;
-    toast(label + ' …', false);
-    // 轮询服务端 copyto 进度(浏览器→本地服务器几乎瞬时，耗时在服务器→Drive)
-    const poll = setInterval(async () => {
-      try {
-        const r = await api('/api/upload/progress?id=' + id);
-        toast(`${label} ${r.pct}%`, false);
-      } catch { /* 忽略单次轮询失败 */ }
-    }, 400);
-    try {
-      const r = await fetch('/api/upload?remote=' + encodeURIComponent(remote) + '&path=' + encodeURIComponent(base + f.name) + '&id=' + id, { method: 'POST', body: f });
-      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || r.status); }
-      existing.add(f.name);
-      done++;
-    } catch (e) { fail++; toast(`上传「${f.name}」失败: ${e.message}`, false); }
-    finally { clearInterval(poll); }
-  }
-  await reloadKeepingCurrent();
-  if (done) toast(`已上传 ${done} 个视频${fail ? `，${fail} 个跳过/失败` : ''}`, false);
-}
-
-$('upload-btn').onclick = () => $('upload-file').click();
-$('upload-file').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) uploadFiles(fs); };
-
-// ---------- 标记 / 移动 ----------
-function next() { if (curIdx + 1 < videos.length) play(curIdx + 1); else toast('已经是最后一个了', false); }
-function prev() { if (curIdx > 0) play(curIdx - 1); }
-
-async function markOk() {
-  if (curIdx < 0) return;
-  const key = markKey(videos[curIdx]);
-  await api('/api/marks', { method: 'POST', body: JSON.stringify({ key, status: 'ok' }) });
-  marks[key] = { status: 'ok' };
-  next();
-}
-
-let moveInFlight = Promise.resolve(); // 后台移动队列，undo 需等它
-
-function markBad() {
-  if (curIdx < 0) return;
-  const v = videos[curIdx];
-  const sub = $('subdir').value.trim() || '不合格';
-  const from = keyOf(v);
-  const to = (curDir ? curDir + '/' : '') + sub + '/' + v.Name;
-  const remote = curRemote.replace(/:$/, '');
-  const markRemote = curRemote;
-  const cur = curIdx;
-  if (v.movedTo) return; // 已经标过
-
-  // 立即标红并切下一个，移动在后台执行，不打断节奏
-  v.movedTo = to;
-  curIdx = -1;
-  if (cur + 1 < videos.length) play(cur + 1); else { stopPlayback(); render(); }
-  toast(`已移入「${sub}」: ${v.Name}`, true);
-
-  moveInFlight = moveInFlight.then(async () => {
-    try {
-      await api('/api/move', { method: 'POST', body: JSON.stringify({ remote, from, to }) });
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: markRemote + to, status: 'bad' }) });
-      lastMove = { from, to, name: v.Name };
-    } catch (e) {
-      v.movedTo = null; // 失败: 撤掉红标并提示
-      render();
-      toast(`移动失败，已恢复标记: ${e.message}`, false);
-    }
-  });
-}
-
-async function undo() {
-  await moveInFlight; // 等后台移动落定，lastMove 才是最新状态
-  if (!lastMove) return;
-  const { from, to, name } = lastMove;
-  lastMove = null;
-  hideToast();
-  try {
-    await api('/api/move', { method: 'POST', body: JSON.stringify({ remote: curRemote.replace(/:$/, ''), from: to, to: from }) });
-    await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + to, status: null }) });
-    await loadDir(curDir);
-    const i = videos.findIndex(v => v.Name === name);
-    if (i >= 0) play(i);
-  } catch (e) {
-    toast('撤销失败: ' + e.message, false);
-  }
-}
-
-// 跳到父文件夹里的上/下一个同级文件夹(按当前排序)，自动播放第一个视频
-async function gotoFolder(delta) {
-  if (!curDir) return toast('已在根目录，没有上一级', false);
-  const cut = curDir.lastIndexOf('/');
-  const parent = cut < 0 ? '' : curDir.slice(0, cut);
-  const name = cut < 0 ? curDir : curDir.slice(cut + 1);
-  $('next-folder-btn').disabled = $('prev-folder-btn').disabled = true;
-  try {
-    const r = await api('/api/list?remote=' + encodeURIComponent(curRemote.replace(/:$/, '')) + '&path=' + encodeURIComponent(parent));
-    const sub = $('subdir').value.trim() || '不合格';
-    const folders = r.entries.filter(e => e.IsDir && e.Name !== sub).sort(sortCmp());
-    const i = folders.findIndex(f => f.Name === name);
-    const j = i + delta;
-    if (i < 0 || j < 0 || j >= folders.length) {
-      return toast(delta > 0 ? '已经是上一级里的最后一个文件夹了' : '已经是上一级里的第一个文件夹了', false);
-    }
-    const target = (parent ? parent + '/' : '') + folders[j].Name;
-    stopPlayback();
-    await loadDir(target);
-    if (videos.length) play(0); else toast(`「${folders[j].Name}」里没有视频`, false);
-  } catch (e) {
-    toast('切换失败: ' + e.message, false);
-  } finally {
-    $('next-folder-btn').disabled = $('prev-folder-btn').disabled = false;
-  }
-}
-$('prev-folder-btn').onclick = () => gotoFolder(-1);
-$('next-folder-btn').onclick = () => gotoFolder(1);
-
-// 按视频编号从小到大，复制检查结果，一行一个，可粘贴到表格一列。
-// 穿帮 = 已被移入「不合格」子文件夹的视频；其余（源文件夹现存）= 已完成。
-async function copyResult() {
-  const remote = curRemote.replace(/:$/, '');
-  const sub = $('subdir').value.trim() || '不合格';
-  const numOf = name => { const n = parseInt(name, 10); return Number.isNaN(n) ? Infinity : n; };
-  // 源文件夹现存视频 → 已完成；排除本会话刚移走(movedTo)的，避免与子文件夹重复
-  const rows = videos.filter(v => !v.movedTo).map(v => ({ name: v.Name, status: '✅ 已完成' }));
-  // 「不合格」子文件夹里的视频 → 穿帮
-  let badCount = 0;
-  try {
-    const badPath = (curDir ? curDir + '/' : '') + sub;
-    const listing = await api('/api/list?remote=' + encodeURIComponent(remote) + '&path=' + encodeURIComponent(badPath));
-    for (const e of listing.entries) {
-      if (!e.IsDir && isVideo(e.Name)) { rows.push({ name: e.Name, status: '穿帮' }); badCount++; }
-    }
-  } catch { /* 没有「不合格」子文件夹 = 没有穿帮 */ }
-  if (!rows.length) { toast('这个文件夹没有可复制的结果', false); return; }
-  rows.sort((a, b) => numOf(a.name) - numOf(b.name) || a.name.localeCompare(b.name, 'zh', { numeric: true }));
-  const text = rows.map(r => r.status).join('\n');
-  if (await writeClipboard(text)) {
-    toast(`已复制 ${rows.length} 条结果（穿帮 ${badCount}），按编号从小到大`, false);
-  } else {
-    toast('复制失败，请检查浏览器剪贴板权限', false);
-  }
-}
-
-// 优先用 clipboard API，失败时回退到 execCommand（对焦点/手势要求更宽松）
-async function writeClipboard(text) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch { /* 落到 execCommand 兜底 */ }
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.focus();
-  ta.select();
-  let ok = false;
-  try { ok = document.execCommand('copy'); } catch { ok = false; }
-  document.body.removeChild(ta);
-  return ok;
-}
-$('copy-result-btn').onclick = copyResult;
-$('folder-done-btn').onclick = () => gotoFolder(1);
-
-let toastTimer;
-function toast(msg, undoable) {
-  $('toast-msg').textContent = msg;
-  $('undo-btn').style.display = undoable ? '' : 'none';
-  $('toast').style.display = 'flex';
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(hideToast, 6000);
-}
-function hideToast() { $('toast').style.display = 'none'; }
-
-// ---------- 快捷键 ----------
-const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
-document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return;
-  const k = e.key;
-  if (k === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
-  else if (k === 'ArrowRight') { e.preventDefault(); chainSeek(video.currentTime + (e.shiftKey ? 30 : 5)); }
-  else if (k === 'ArrowLeft') { e.preventDefault(); chainSeek(video.currentTime - (e.shiftKey ? 30 : 5)); }
-  else if (k === ',') { video.pause(); chainSeek(Math.max(0, video.currentTime - FRAME)); }
-  else if (k === '.') { video.pause(); chainSeek(video.currentTime + FRAME); }
-  else if (k === 'ArrowUp' || k === 'ArrowDown') {
-    e.preventDefault();
-    let i = SPEEDS.indexOf(video.playbackRate);
-    if (i < 0) i = 2;
-    i = Math.min(SPEEDS.length - 1, Math.max(0, i + (k === 'ArrowUp' ? 1 : -1)));
-    video.playbackRate = SPEEDS[i];
-    $('speed').textContent = SPEEDS[i] + 'x';
-  }
-  else if (k === 'm' || k === 'M') { video.muted = !video.muted; $('mute-btn').textContent = video.muted ? '🔇' : '🔊'; }
-  else if (k === 'g' || k === 'G') markOk();
-  else if (k === 'b' || k === 'B') markBad();
-  else if (k === 'Enter') next();
-  else if (k === 'p' || k === 'P') prev();
-});
-
-$('play-btn').onclick = () => video.paused ? video.play() : video.pause();
-$('mute-btn').onclick = () => { video.muted = !video.muted; $('mute-btn').textContent = video.muted ? '🔇' : '🔊'; };
-$('ok-btn').onclick = markOk;
-$('bad-btn').onclick = markBad;
-$('next-btn').onclick = next;
-$('prev-btn').onclick = prev;
-$('undo-btn').onclick = undo;
-video.addEventListener('ended', next);
-
-// ---------- 账号切换 / 导入 ----------
-async function loadRemotes() {
-  const r = await api('/api/remotes');
-  // 每个账号两个入口: 自己的盘 + 「与我共享」(shared_with_me 视图，可看他人分享的文件夹)
-  const options = [];
-  for (const name of r.remotes) {
-    const base = name.replace(/:$/, '');
-    options.push({ value: name, label: base });
-    options.push({ value: base + ',shared_with_me:', label: base + ' (共享给我)' });
-  }
-  if (!options.some(o => o.value === curRemote)) {
-    const saved = localStorage.getItem('remote');
-    curRemote = options.some(o => o.value === saved) ? saved
-      : r.remotes.includes('gdrive:') ? 'gdrive:' : options[0].value;
-  }
-  const sel = $('remote-sel');
-  sel.innerHTML = '';
-  for (const o of options) {
-    const opt = document.createElement('option');
-    opt.value = o.value;
-    opt.textContent = o.label;
-    opt.selected = o.value === curRemote;
-    sel.appendChild(opt);
-  }
-}
-
-function stopPlayback() {
-  video.pause();
-  resetLoader();
-  video.removeAttribute('src');
-  video.load();
-  video.style.display = 'none';
-  $('placeholder').style.display = '';
-  $('player-wrap').classList.remove('has-video');
-  $('cur-name').textContent = '未选择视频';
-}
-
-$('remote-sel').onchange = e => {
-  curRemote = e.target.value;
-  localStorage.setItem('remote', curRemote);
-  stopPlayback();
-  loadDir('');
-};
-
-$('sort-sel').value = sortMode;
-$('sort-sel').onchange = e => {
-  sortMode = e.target.value;
-  localStorage.setItem('sortMode', sortMode);
-  applySort();
-  render();
-};
-
-$('link-btn').onclick = async () => {
-  let link;
-  try {
-    const r = await api('/api/link?remote=' + encodeURIComponent(curRemote.replace(/:$/, '')) + '&path=' + encodeURIComponent(curDir));
-    link = r.url;
-  } catch (e) {
-    return toast('取链接失败: ' + e.message, false);
-  }
-  try {
-    await navigator.clipboard.writeText(link);
-    toast('已复制链接: ' + link, false);
-  } catch {
-    prompt('自动复制失败，请手动复制：', link); // 页面未聚焦等情况的兜底
-  }
-};
-
-// ---------- 粘贴链接: 用当前账号的授权去浏览"任何知道链接的人可查看/编辑"的文件夹 ----------
-function parseDriveFolderId(input) {
-  input = input.trim();
-  let m = /\/folders\/([A-Za-z0-9_-]{10,100})/.exec(input);
-  if (m) return m[1];
-  m = /^[A-Za-z0-9_-]{10,100}$/.exec(input); // 允许直接粘贴 ID
-  if (m) return m[0];
-  return null;
-}
-
-$('link-paste-btn').onclick = () => {
-  const raw = $('link-paste-input').value;
-  const folderId = parseDriveFolderId(raw);
-  if (!folderId) return toast('看不出这是个文件夹链接（单个文件的链接暂不支持）', false);
-  const baseAccount = curRemote.replace(/:$/, '').split(',')[0];
-  const value = baseAccount + ',root_folder_id=' + folderId + ':';
-  const sel = $('remote-sel');
-  let opt = [...sel.options].find(o => o.value === value);
-  if (!opt) {
-    opt = document.createElement('option');
-    opt.value = value;
-    opt.textContent = '🔗 链接文件夹 ' + folderId.slice(0, 8) + '…';
-    sel.appendChild(opt);
-  }
-  sel.value = value;
-  curRemote = value;
-  localStorage.setItem('remote', curRemote);
-  $('link-paste-input').value = '';
-  stopPlayback();
-  loadDir('');
-};
-
-$('import-btn').onclick = () => $('import-file').click();
-$('import-file').onchange = async e => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
-  const text = await file.text();
-  const name = prompt('给这个账号起个名字（字母数字-_）：', file.name.replace(/\.json$/i, '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 32) || 'gdrive2');
-  if (!name) return;
-  try {
-    const r = await api('/api/remotes/import', { method: 'POST', body: JSON.stringify({ name, json: text }) });
-    await loadRemotes();
-    $('remote-sel').value = r.remote;
-    $('remote-sel').dispatchEvent(new Event('change'));
-    toast(`已导入 ${r.remote} — 记得把目标文件夹分享给 ${r.email}`, false);
-  } catch (err) {
-    toast('导入失败: ' + err.message, false);
-  }
-};
-
-loadRemotes().then(() => loadDir(''));
-</script>
+<script src="/drive-link.js"></script>
+<script src="/batch-ops.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>

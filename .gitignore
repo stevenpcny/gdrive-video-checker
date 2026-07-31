@@ -11,7 +11,18 @@ server.log
 # 本地编辑器/系统
 .DS_Store
 .claude/settings.local.json
+.claude/launch.json
+settings.json
 
-# 缓存/临时（本就在系统 tmp，非仓库内，列此以防万一）
+# 缓存/临时
 video-checker-thumbs/
 video-checker-cache/
+.vendor-build/
+vendor/bin/
+
+# Electron 构建
+node_modules/
+dist/
+*.dmg
+*.zip
+*.blockmap

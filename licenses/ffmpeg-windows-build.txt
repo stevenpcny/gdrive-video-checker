@@ -1,0 +1,8 @@
+FFmpeg 8.1.2 (n8.1.2-32-gcfa62de001)
+Source: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-30-13-32/ffmpeg-n8.1.2-32-gcfa62de001-win64-lgpl-8.1.zip
+SHA-256: c5a091e6a0e446f737f5ae78f9ed38dc02081c014156097468c196b606c4717f
+Provider: BtbN/FFmpeg-Builds autobuild-2026-07-30-13-32
+License profile: LGPL-only build variant; --enable-gpl and --enable-nonfree are not used
+Architecture: x86-64
+Purpose: local thumbnail extraction only
+Corresponding sources and build scripts: https://github.com/BtbN/FFmpeg-Builds

@@ -1,0 +1,21 @@
+视频检查器第三方组件说明
+
+Electron / Chromium
+- Electron 43.1.0
+- Electron and Chromium license files are included by the Electron distribution in the application bundle.
+- https://www.electronjs.org/
+
+rclone
+- rclone 1.73.2
+- MIT License
+- Source: https://github.com/rclone/rclone/tree/v1.73.2
+- Binary archives: https://downloads.rclone.org/v1.73.2/
+
+FFmpeg
+- FFmpeg 8.1
+- Built from source without --enable-gpl or --enable-nonfree.
+- Distributed under LGPL 2.1 or later according to the included FFmpeg license files.
+- Source archive, checksum, and build configuration are included with this distribution.
+- https://ffmpeg.org/
+
+This application is distributed independently from Apple, Google, Electron, rclone, and FFmpeg.
