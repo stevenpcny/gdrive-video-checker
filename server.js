@@ -169,15 +169,17 @@ async function createVideoCheckerServer(options = {}) {
   }
 
   function execTool(command, args, opts = {}) {
+    const { onChild, ...execOpts } = opts;
     return new Promise((resolve, reject) => {
       const proc = trackChild(execFile(command, args, {
         maxBuffer: opts.maxBuffer || 64 * 1024 * 1024,
-        ...opts
+        ...execOpts
       }, (err, stdout, stderr) => {
         if (err) reject(new Error((stderr || '').trim() || err.message));
         else resolve(stdout);
       }));
       proc.on('error', reject);
+      if (onChild) onChild(proc);
     });
   }
 
@@ -535,6 +537,11 @@ async function createVideoCheckerServer(options = {}) {
     }
   }
 
+  function killOauthChild(session) {
+    if (session.proc && !session.proc.killed) session.proc.kill('SIGTERM');
+    session.proc = null;
+  }
+
   async function oauthStep(session, state, result) {
     const values = ['scope', 'drive'];
     if (session.clientId) values.push('client_id', session.clientId);
@@ -542,7 +549,13 @@ async function createVideoCheckerServer(options = {}) {
     const args = state
       ? ['config', 'update', session.name, ...values, '--continue', '--state', state, '--result', String(result ?? ''), '--non-interactive']
       : ['config', 'create', session.name, 'drive', ...values, '--all', '--non-interactive'];
-    const question = parseConfigQuestion(await rclone(args));
+    let output;
+    try {
+      output = await rclone(args, { onChild: (proc) => { session.proc = proc; } });
+    } finally {
+      session.proc = null;
+    }
+    const question = parseConfigQuestion(output);
     if (!question.State) {
       await rclone(['lsd', session.name + ':', '--max-depth', '1']);
       await refreshRemotes();
@@ -1158,12 +1171,15 @@ async function createVideoCheckerServer(options = {}) {
         if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) return json(res, 400, { error: '名称只能用字母数字-_（32字内）' });
         await refreshRemotes();
         if (knownRemotes.has(name)) return json(res, 409, { error: '该账号名称已存在' });
+        // 清理上一次未走完的授权：残留的 rclone 会一直占着 127.0.0.1:53682
+        for (const stale of oauthSessions.values()) killOauthChild(stale);
         const session = {
           id: crypto.randomBytes(16).toString('hex'),
           name,
           clientId: typeof body.clientId === 'string' ? body.clientId.trim() : '',
           clientSecret: typeof body.clientSecret === 'string' ? body.clientSecret.trim() : '',
-          state: ''
+          state: '',
+          proc: null
         };
         oauthSessions.set(session.id, session);
         try {
@@ -1197,6 +1213,7 @@ async function createVideoCheckerServer(options = {}) {
         const body = await readBody(req);
         const session = oauthSessions.get(body.sessionId);
         if (session) {
+          killOauthChild(session);
           oauthSessions.delete(session.id);
           await rclone(['config', 'delete', session.name]).catch(() => {});
         }
