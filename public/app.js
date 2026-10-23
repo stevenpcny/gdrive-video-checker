@@ -1,6 +1,13 @@
 const VIDEO_EXT = new Set(['mp4','mov','m4v','mkv','webm','avi','ts','mts','flv','wmv','3gp']);
 const MAX_DECODED_THUMBS = 600;
-const FRAME = 1 / 30;
+const SPEEDS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+let frameDur = 1 / 30;   // 探测到真实帧率前的兜底值
+let mediaInfo = null;    // 当前视频的 {width,height,fps,bitDepth,codec,...}
+let mediaSeq = 0;        // 探测信息自己一套序号: startFullLoad 会再推进 loadSeq
+let decodeFailed = false;
+let loopIn = null;       // 区间首帧
+let loopOut = null;      // 区间尾帧(含)
+let looping = false;
 const DESKTOP = window.videoCheckerDesktop || null;
 const { makeItem: makeBatchItem, validateMoveTarget } = window.BatchOps;
 const AUTO_FIT_WINDOW = !!DESKTOP || new URLSearchParams(location.search).has('standalone');
@@ -23,7 +30,11 @@ let batchBusy = false;
 let loadSeq = 0;
 let cacheReady = false;
 
-let curRemote = '';    // 当前账号(rclone remote 名，含冒号)
+let curRemote = '';    // 当前账号(rclone remote 名，含冒号)；本地模式是 local-<id>:
+let localMode = false;
+let localDir = '';
+
+const isLocalRemote = name => typeof name === 'string' && name.startsWith('local-');
 
 const isVideo = name => VIDEO_EXT.has(name.split('.').pop().toLowerCase());
 const encPath = p => p.split('/').map(encodeURIComponent).join('/');
@@ -69,6 +80,7 @@ async function loadDir(p) {
     videos = listing.entries.filter(e => !e.IsDir && isVideo(e.Name));
     applySort();
     render();
+    renderFlags();
     warmTimer = setTimeout(() => warmChildDirectories(seq), 250);
   } catch (e) {
     if (seq === loadDirSeq) showListMessage('加载失败: ' + e.message, true);
@@ -204,7 +216,7 @@ function render() {
     link.onclick = () => loadDir(target);
     crumbs.appendChild(link);
   };
-  addCrumb('📁 根目录', '');
+  addCrumb(localMode ? '💻 ' + (localDir.split('/').filter(Boolean).pop() || localDir) : '📁 根目录', '');
   for (const part of parts) {
     acc = acc ? acc + '/' + part : part;
     addCrumb(part, acc);
@@ -232,8 +244,10 @@ function render() {
     el.className = 'entry' + (i === curIdx ? ' active' : '') + (v.movedTo ? ' badrow' : '');
     el.dataset.idx = i;
     const mark = v.movedTo ? { status: 'bad' } : marks[markKey(v)];
+    const flagCount = flagsOf(markKey(v)).length;
     el.innerHTML = `<span class="icon">🎬</span><span class="name"></span>` +
-      (mark ? `<span class="badge ${mark.status}">${mark.status === 'ok' ? '合格' : '不合格'}</span>` : '') +
+      (flagCount ? `<span class="badge bad" title="已记 ${flagCount} 个穿帮点">穿 ${flagCount}</span>` : '') +
+      (mark && mark.status ? `<span class="badge ${mark.status}">${mark.status === 'ok' ? '合格' : '不合格'}</span>` : '') +
       `<span class="cache-dot${cachedSet.has(markKey(v)) ? ' cached' : ''}" title="绿点=已预热，秒开"></span>` +
       (v.movedTo ? '' : `<span class="actions"><span class="act-rename" title="重命名视频">✎</span><span class="act-del" title="删除视频">🗑</span></span>`);
     el.querySelector('.name').textContent = v.Name;
@@ -299,7 +313,10 @@ function play(i) {
   video.style.display = '';
   $('player-wrap').classList.add('has-video');
   resetLoader();
+  clearLoop();
   video.src = streamUrl(curRemote, pathOf(v));
+  loadMediaInfo(v, mediaSeq);
+  renderFlags();
   requestAnimationFrame(updateNavHitAreas);
   video.play().catch(() => {});
   $('cur-name').textContent = `[${i + 1}/${videos.length}] ${v.Name}`;
@@ -313,6 +330,11 @@ function play(i) {
 function resetLoader() {
   loadSeq++;
   cacheReady = false;
+  mediaSeq++;
+  mediaInfo = null;
+  decodeFailed = false;
+  frameDur = 1 / 30;
+  renderMediaInfo();
   if (dragSeekRaf) { cancelAnimationFrame(dragSeekRaf); dragSeekRaf = 0; }
   scrubPreviewSeq++;
   requestedScrubSrc = '';
@@ -323,6 +345,51 @@ function resetLoader() {
   thumbs = null;
   thumbFrames.clear();
   thumbStride = 1;
+}
+
+// ---------- 媒体信息: 分辨率 / 帧率 / 色深 ----------
+const fpsText = value => String(Number(value.toFixed(3)));
+
+async function loadMediaInfo(v, seq) {
+  try {
+    const info = await api('/api/probe', {
+      method: 'POST',
+      body: JSON.stringify({ remote: curRemote.replace(/:$/, ''), path: pathOf(v) })
+    });
+    if (seq !== mediaSeq) return;
+    mediaInfo = info;
+    if (info.fps > 0) frameDur = 1 / info.fps;
+    renderMediaInfo();
+  } catch {
+    if (seq === mediaSeq) renderMediaInfo();
+  }
+}
+
+function renderMediaInfo() {
+  const el = $('vinfo');
+  if (!el) return;
+  if (!mediaInfo) {
+    el.textContent = '';
+    el.title = '';
+    el.classList.remove('warn');
+    return;
+  }
+  const info = mediaInfo;
+  const parts = [];
+  if (info.width) parts.push(`${info.width}×${info.height}`);
+  if (info.fps) parts.push(fpsText(info.fps) + 'fps');
+  if (info.bitDepth) parts.push(info.bitDepth + 'bit');
+  if (info.codec) parts.push(info.codec);
+  const broken = decodeFailed || info.playable === false;
+  if (broken) parts.push('⚠ 本机不能直接解码');
+  el.textContent = parts.join(' · ');
+  el.classList.toggle('warn', broken);
+  el.title = [
+    info.pixFmt && ('像素格式 ' + info.pixFmt),
+    info.colorTags && ('色彩 ' + info.colorTags),
+    info.bitrateKbps && (`码率 ${info.bitrateKbps} kb/s`),
+    broken && '播放器放不了这个编码；信息和逐帧预览仍可用'
+  ].filter(Boolean).join('\n');
 }
 
 async function startFullLoad(v) {
@@ -343,7 +410,8 @@ async function startFullLoad(v) {
     render();
     refreshRamStatus().catch(() => {});
     cacheReady = true;
-    stateEl.textContent = '✓ 已预载·可连续拖动检查' + (thumbFrames.size ? '·丝滑预览就绪' : '');
+    stateEl.textContent = (result.local ? '✓ 本地文件·可连续拖动检查' : '✓ 已预载·可连续拖动检查')
+      + (thumbFrames.size ? '·丝滑预览就绪' : '');
     stateEl.className = 'ready';
   } catch (e) {
     if (seq === loadSeq) stateEl.textContent = '';
@@ -579,6 +647,17 @@ function updateBar() {
   $('seek-handle').style.left = (frac * 100) + '%';
   $('time-cur').textContent = fmt(video.currentTime);
   $('time-dur').textContent = fmt(d);
+  $('frame-info').textContent = mediaInfo && mediaInfo.fps && d
+    ? `帧 ${currentFrame() + 1}/${Math.max(1, Math.round(d / frameDur))}`
+    : '';
+  if (looping && loopOut !== null && !dragging && d) {
+    const start = ((loopIn === null ? 0 : loopIn) + 0.5) * frameDur;
+    const end = (loopOut + 1) * frameDur;
+    if (video.currentTime >= end || video.currentTime < start - frameDur) {
+      pendingSeek = null; // 循环说了算，丢掉排队中的旧目标
+      chainSeek(start);
+    }
+  }
   let buf = 0;
   for (let i = 0; i < video.buffered.length; i++) buf = Math.max(buf, video.buffered.end(i));
   $('seek-buffered').style.width = (d ? buf / d * 100 : 0) + '%';
@@ -589,6 +668,8 @@ requestAnimationFrame(updateBar);
 video.addEventListener('play', () => $('play-btn').textContent = '⏸');
 video.addEventListener('pause', () => $('play-btn').textContent = '▶');
 video.addEventListener('loadedmetadata', () => {
+  renderFlags();
+  renderLoop();
   updateNavHitAreas();
   fitWindowToVideo(++fitWindowSeq);
 });
@@ -612,7 +693,7 @@ async function reloadKeepingCurrent(activeName) {
 
 async function renameEntry(entry, isDir) {
   const oldName = entry.Name;
-  const input = prompt(`重命名${isDir ? '文件夹' : '视频'}：`, oldName);
+  const input = await askText(`重命名${isDir ? '文件夹' : '视频'}`, oldName);
   if (input === null) return;
   const newName = input.trim();
   if (!newName || newName === oldName) return;
@@ -626,8 +707,9 @@ async function renameEntry(entry, isDir) {
     await api('/api/rename', { method: 'POST', body: JSON.stringify({ remote, from, to }) });
     // 迁移文件标记(marks 以路径为 key，不迁会失联；文件夹内子项标记无法批量迁，属既有限制)
     if (!isDir && marks[curRemote + from]) {
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + to, status: marks[curRemote + from].status }) });
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + from, status: null }) });
+      const moved = marks[curRemote + from];
+      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + to, status: moved.status || null, flags: moved.flags || [] }) });
+      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + from, status: null, flags: [] }) });
     }
     await reloadKeepingCurrent(wasCurrent ? newName : undefined);
     toast(`已重命名为「${newName}」`, false);
@@ -1081,7 +1163,13 @@ function markBad() {
   moveInFlight = moveInFlight.then(async () => {
     try {
       await api('/api/move', { method: 'POST', body: JSON.stringify({ remote, from, to }) });
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: markRemote + to, status: 'bad' }) });
+      const moved = flagsOf(markRemote + from);
+      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: markRemote + to, status: 'bad', flags: moved }) });
+      marks[markRemote + to] = { status: 'bad', ...(moved.length ? { flags: moved } : {}) };
+      if (moved.length) {
+        await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: markRemote + from, flags: [] }) });
+        if (marks[markRemote + from]) delete marks[markRemote + from].flags;
+      }
       lastMove = { from, to, name: v.Name };
     } catch (e) {
       v.movedTo = null; // 失败: 撤掉红标并提示
@@ -1197,6 +1285,45 @@ function toast(msg, undoable) {
 }
 function hideToast() { $('toast').style.display = 'none'; }
 
+// ---------- 播放速度 ----------
+function renderSpeed(rate) {
+  // 和下拉框一致时不再重复显示；长按扫描时由 startArrowHold 写入「快进 4×」
+  $('speed').textContent = Number($('speed-sel').value) === rate ? '' : Number(rate.toFixed(2)) + 'x';
+}
+
+function setSpeed(rate, persist = true) {
+  const value = Math.min(4, Math.max(0.0625, Number(rate) || 1));
+  // defaultPlaybackRate 一起设，否则换视频时 playbackRate 会被重置回 1。
+  video.defaultPlaybackRate = value;
+  video.playbackRate = value;
+  $('speed-sel').value = SPEEDS.includes(value) ? String(value) : '';
+  renderSpeed(value);
+  if (persist) saveSettings({ playbackRate: value }).catch(() => {});
+}
+
+function nudgeSpeed(direction) {
+  const current = video.defaultPlaybackRate || 1;
+  let index = SPEEDS.findIndex(rate => rate >= current - 1e-6);
+  if (index < 0) index = SPEEDS.length - 1;
+  setSpeed(SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, index + direction))]);
+}
+
+$('speed-sel').onchange = e => setSpeed(Number(e.target.value));
+$('frame-info').onclick = () => askJumpFrame();
+
+// ---------- 逐帧 ----------
+const frameAt = t => Math.max(0, Math.round(t / frameDur - 0.5));
+const currentFrame = () => frameAt(video.currentTime);
+// seek 还在路上时 video.currentTime 仍是旧值；取排队中的目标，
+// 否则「跳帧之后马上按 F / O / L」会落在上一个位置上。
+const targetFrame = () => frameAt(pendingSeek !== null ? pendingSeek : video.currentTime);
+
+function stepFrame(delta) {
+  const target = Math.max(0, currentFrame() + delta);
+  // 落在帧中心，避免精度误差把画面停在相邻帧上。
+  chainSeek(Math.min(video.duration || Infinity, (target + 0.5) * frameDur));
+}
+
 // ---------- 快捷键 ----------
 let arrowHold = null;
 
@@ -1207,7 +1334,7 @@ function finishArrowHold(commitShort = true) {
   clearTimeout(hold.timer);
   if (hold.interval) clearInterval(hold.interval);
   video.playbackRate = hold.originalPlaybackRate;
-  $('speed').textContent = hold.originalPlaybackRate.toFixed(1) + 'x';
+  renderSpeed(hold.originalPlaybackRate);
   $('scrub-overlay').style.display = 'none';
   if (hold.active) {
     if (hold.wasPlaying) video.play().catch(() => {});
@@ -1261,14 +1388,23 @@ function startArrowHold(key, shiftKey) {
 
 document.addEventListener('keydown', e => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) return;
+  if (!$('ask-modal').hidden) return;
   const k = e.key;
   if (k === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
   else if (k === 'ArrowRight' || k === 'ArrowLeft') {
     e.preventDefault();
     if (!e.repeat) startArrowHold(k, e.shiftKey);
   }
-  else if (k === ',') { video.pause(); chainSeek(Math.max(0, video.currentTime - FRAME)); }
-  else if (k === '.') { video.pause(); chainSeek(video.currentTime + FRAME); }
+  else if (k === ',') { video.pause(); stepFrame(-1); }
+  else if (k === '.') { video.pause(); stepFrame(1); }
+  else if (k === '[') { e.preventDefault(); nudgeSpeed(-1); }
+  else if (k === ']') { e.preventDefault(); nudgeSpeed(1); }
+  else if (k === 'f' || k === 'F') { e.preventDefault(); addFlag(); }
+  else if (k === 'j' || k === 'J') { e.preventDefault(); askJumpFrame(); }
+  else if (k === 'i' || k === 'I') { e.preventDefault(); setLoopEdge('in'); }
+  else if (k === 'o' || k === 'O') { e.preventDefault(); setLoopEdge('out'); }
+  else if (k === 'l' || k === 'L') { e.preventDefault(); toggleLoop(); }
+  else if (k === 'Escape') { if (looping || loopIn !== null) { clearLoop(); toast('已清除区间', false); } }
   else if (k === 'ArrowUp') {
     e.preventDefault();
     if (!e.repeat) prev();
@@ -1371,6 +1507,287 @@ async function loadRemotes() {
   return true;
 }
 
+// ---------- 输入框 ----------
+// Electron 的渲染进程里 window.prompt 会直接抛错，所以自己做一个。
+let askResolve = null;
+
+function askText(title, value = '', hint = '') {
+  $('ask-title').textContent = title;
+  $('ask-hint').textContent = hint;
+  const input = $('ask-input');
+  input.value = value;
+  $('ask-modal').hidden = false;
+  input.focus();
+  input.select();
+  return new Promise(resolve => { askResolve = resolve; });
+}
+
+function closeAsk(value) {
+  if (!askResolve) return;
+  const resolve = askResolve;
+  askResolve = null;
+  $('ask-modal').hidden = true;
+  resolve(value);
+}
+
+$('ask-ok-btn').onclick = () => closeAsk($('ask-input').value);
+$('ask-cancel-btn').onclick = () => closeAsk(null);
+$('ask-input').onkeydown = e => {
+  e.stopPropagation();
+  if (e.key === 'Enter') closeAsk($('ask-input').value);
+  else if (e.key === 'Escape') closeAsk(null);
+};
+
+// ---------- 穿帮点 ----------
+const fmtAt = t => {
+  const cs = Math.max(0, Math.round(t * 100));
+  const sec = Math.floor(cs / 100);
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;
+};
+const flagsOf = key => (marks[key] && marks[key].flags) || [];
+const curFlagKey = () => (curIdx >= 0 && videos[curIdx] ? markKey(videos[curIdx]) : '');
+
+async function saveFlags(key, list) {
+  const sorted = [...list].sort((a, b) => a.frame - b.frame);
+  const entry = marks[key] || {};
+  if (sorted.length) marks[key] = { ...entry, flags: sorted };
+  else { delete entry.flags; marks[key] = entry; if (!entry.status) delete marks[key]; }
+  renderFlags();
+  render();
+  try {
+    await api('/api/marks', { method: 'POST', body: JSON.stringify({ key, flags: sorted }) });
+  } catch (error) {
+    toast('穿帮点没能保存: ' + error.message, false);
+  }
+}
+
+function addFlag() {
+  const key = curFlagKey();
+  if (!key || !video.duration) return;
+  const frame = targetFrame();
+  const list = flagsOf(key);
+  if (list.some(item => item.frame === frame)) {
+    toast(`第 ${frame + 1} 帧已经标过了`, false);
+    return;
+  }
+  saveFlags(key, [...list, { frame, t: Number(((frame + 0.5) * frameDur).toFixed(3)) }]);
+  toast(`已记穿帮点：第 ${frame + 1} 帧 · ${fmtAt(video.currentTime)}`, false);
+}
+
+function removeFlag(frame) {
+  const key = curFlagKey();
+  if (!key) return;
+  saveFlags(key, flagsOf(key).filter(item => item.frame !== frame));
+}
+
+function renderFlags() {
+  const panel = $('flag-panel');
+  const key = curFlagKey();
+  const list = key ? flagsOf(key) : [];
+  panel.hidden = curIdx < 0;
+  $('flag-title').textContent = list.length ? `穿帮点 ${list.length} 个` : '穿帮点（按 F 记录）';
+  $('flag-clear-btn').disabled = !list.length;
+  const rows = list.map(item => {
+    const row = document.createElement('div');
+    row.className = 'flag-row';
+    row.innerHTML = '<span class="frame"></span><span class="at"></span><span class="del" title="删掉这个点">✕</span>';
+    row.querySelector('.frame').textContent = '帧 ' + (item.frame + 1);
+    row.querySelector('.at').textContent = fmtAt(item.t);
+    row.onclick = () => jumpToFrame(item.frame);
+    row.querySelector('.del').onclick = e => { e.stopPropagation(); removeFlag(item.frame); };
+    return row;
+  });
+  $('flag-list').replaceChildren(...rows);
+
+  const ticks = video.duration
+    ? list.map(item => {
+      const tick = document.createElement('i');
+      tick.style.left = (item.t / video.duration * 100) + '%';
+      return tick;
+    })
+    : [];
+  $('seek-flags').replaceChildren(...ticks);
+}
+
+$('flag-clear-btn').onclick = () => {
+  const key = curFlagKey();
+  if (key && flagsOf(key).length) saveFlags(key, []);
+};
+
+$('flag-copy-btn').onclick = async () => {
+  const rows = [];
+  for (const v of videos) {
+    for (const item of flagsOf(markKey(v))) {
+      rows.push(`${v.Name}\t帧 ${item.frame + 1}\t${fmtAt(item.t)}`);
+    }
+  }
+  if (!rows.length) return toast('这个文件夹还没有穿帮点', false);
+  if (await writeClipboard(rows.join('\n'))) toast(`已复制 ${rows.length} 个穿帮点（文件名/帧号/时间）`, false);
+  else toast('复制失败，请检查剪贴板权限', false);
+};
+
+// ---------- 跳帧 / 区间循环 ----------
+function jumpToFrame(frame) {
+  if (!video.duration) return;
+  const last = Math.max(0, Math.round(video.duration / frameDur) - 1);
+  const target = Math.min(last, Math.max(0, frame));
+  video.pause();
+  chainSeek((target + 0.5) * frameDur);
+}
+
+async function askJumpFrame() {
+  if (!video.duration) return;
+  const total = Math.round(video.duration / frameDur);
+  const typed = await askText('跳到第几帧', String(targetFrame() + 1), `这个视频共 ${total} 帧（从 1 开始）`);
+  if (typed === null) return;
+  const frame = parseInt(typed.trim(), 10);
+  if (!Number.isFinite(frame)) return toast('请输入帧号数字', false);
+  jumpToFrame(frame - 1);
+}
+
+function renderLoop() {
+  const band = $('seek-loop');
+  const label = $('loop-state');
+  if (loopIn === null && loopOut === null) {
+    band.hidden = true;
+    label.textContent = '';
+    return;
+  }
+  const from = loopIn === null ? 0 : loopIn;
+  const to = loopOut === null ? Math.round((video.duration || 0) / frameDur) - 1 : loopOut;
+  label.textContent = `区间 ${from + 1}–${to + 1} 帧（${to - from + 1} 帧）` + (looping ? ' · 循环中' : ' · 按 L 循环');
+  if (!video.duration) { band.hidden = true; return; }
+  const left = from * frameDur / video.duration * 100;
+  const right = (to + 1) * frameDur / video.duration * 100;
+  band.hidden = false;
+  band.style.left = Math.max(0, left) + '%';
+  band.style.width = Math.max(0.6, Math.min(100, right) - Math.max(0, left)) + '%';
+}
+
+function setLoopEdge(which) {
+  if (!video.duration) return;
+  const frame = targetFrame();
+  if (which === 'in') loopIn = frame;
+  else loopOut = frame;
+  if (loopIn !== null && loopOut !== null && loopOut < loopIn) [loopIn, loopOut] = [loopOut, loopIn];
+  renderLoop();
+  toast(which === 'in' ? `区间首帧 = 第 ${frame + 1} 帧` : `区间尾帧 = 第 ${frame + 1} 帧`, false);
+}
+
+function toggleLoop() {
+  if (!video.duration) return;
+  if (looping) {
+    looping = false;
+    renderLoop();
+    toast('已停止区间循环', false);
+    return;
+  }
+  // 没设区间时，默认围绕当前帧取 ±10 帧——补丁接点就是这么看的
+  if (loopIn === null || loopOut === null) {
+    const frame = targetFrame();
+    loopIn = Math.max(0, frame - 10);
+    loopOut = frame + 10;
+  }
+  looping = true;
+  renderLoop();
+  jumpToFrame(loopIn);
+  video.play().catch(() => {});
+  toast(`循环第 ${loopIn + 1}–${loopOut + 1} 帧，按 L 停止`, false);
+}
+
+function clearLoop() {
+  loopIn = loopOut = null;
+  looping = false;
+  renderLoop();
+}
+
+// ---------- 本地视频: 拖进来或自己选 ----------
+async function openLocalPaths(paths) {
+  const list = (paths || []).filter(Boolean);
+  if (!list.length) return;
+  try {
+    const result = await api('/api/local/open', { method: 'POST', body: JSON.stringify({ paths: list }) });
+    await enterLocalMode(result);
+  } catch (error) {
+    toast('打开本地视频失败: ' + error.message, false);
+  }
+}
+
+async function enterLocalMode(result) {
+  stopPlayback();
+  localMode = true;
+  localDir = result.dir;
+  curRemote = result.remote + ':';
+  document.body.classList.add('local-mode');
+  const sel = $('remote-sel');
+  let option = sel.querySelector('option[data-local="1"]');
+  if (!option) {
+    option = document.createElement('option');
+    option.dataset.local = '1';
+    sel.appendChild(option);
+  }
+  option.value = curRemote;
+  option.textContent = '📂 ' + (result.dir.split('/').filter(Boolean).pop() || result.dir);
+  sel.disabled = false;
+  sel.value = curRemote;
+  await loadDir('');
+  $('stats').textContent = '本地文件夹：' + result.dir;
+  if (!videos.length) {
+    toast('这个文件夹里没有可识别的视频文件', false);
+    return;
+  }
+  const picked = (result.startNames || [])
+    .map(name => videos.findIndex(v => v.Name === name))
+    .find(index => index >= 0);
+  play(picked === undefined ? 0 : picked);
+}
+
+function exitLocalMode() {
+  localMode = false;
+  localDir = '';
+  document.body.classList.remove('local-mode');
+  $('remote-sel').querySelector('option[data-local="1"]')?.remove();
+}
+
+$('local-btn').onclick = async () => {
+  if (DESKTOP && DESKTOP.pickLocalVideos) return openLocalPaths(await DESKTOP.pickLocalVideos());
+  // 浏览器里拿不到真实路径，只能让用户给出文件夹路径。
+  const typed = await askText('打开本地文件夹', localDir || '', '浏览器模式下读不到拖拽文件的真实路径，请直接输入文件夹路径');
+  if (typed && typed.trim()) openLocalPaths([typed.trim()]);
+};
+
+let dropDepth = 0;
+const showDropHint = show => { $('drop-hint').hidden = !show; };
+
+document.addEventListener('dragenter', e => {
+  if (![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault();
+  dropDepth++;
+  showDropHint(true);
+});
+document.addEventListener('dragover', e => {
+  if (![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+document.addEventListener('dragleave', () => {
+  dropDepth = Math.max(0, dropDepth - 1);
+  if (!dropDepth) showDropHint(false);
+});
+document.addEventListener('drop', e => {
+  if (![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault();
+  dropDepth = 0;
+  showDropHint(false);
+  const files = [...e.dataTransfer.files];
+  if (!files.length) return;
+  if (!DESKTOP || !DESKTOP.getPathForFile) {
+    toast('浏览器模式下拿不到文件路径，请在「视频检查器」应用里拖拽，或用「📂 本地」输入文件夹路径', false);
+    return;
+  }
+  openLocalPaths(files.map(file => DESKTOP.getPathForFile(file)));
+});
+
 function stopPlayback() {
   finishArrowHold(false);
   publicMode = false;
@@ -1388,10 +1805,13 @@ function stopPlayback() {
   $('placeholder').style.display = '';
   $('player-wrap').classList.remove('has-video');
   $('cur-name').textContent = '未选择视频';
+  clearLoop();
+  renderFlags();
 }
 
 function openPublicVideo(link) {
   stopPlayback();
+  exitLocalMode();
   publicMode = true;
   currentPublicLink = link;
   document.body.classList.add('public-mode');
@@ -1455,6 +1875,14 @@ async function diagnosePublicPlayback() {
   }
 }
 
+video.addEventListener('error', () => {
+  if (publicMode || !video.getAttribute('src')) return;
+  decodeFailed = true;
+  renderMediaInfo();
+  const codec = mediaInfo && mediaInfo.codec ? mediaInfo.codec + (mediaInfo.bitDepth ? ` ${mediaInfo.bitDepth}bit` : '') : '这个编码';
+  toast(`播放器无法解码 ${codec}；信息栏和逐帧预览仍可用`, false);
+});
+
 video.addEventListener('error', async () => {
   if (!publicMode || document.body.classList.contains('public-preview-mode')) return;
   $('public-fallback-btn').hidden = false;
@@ -1466,7 +1894,14 @@ video.addEventListener('error', async () => {
 $('remote-sel').onchange = async e => {
   if (!e.target.value) return;
   curRemote = e.target.value;
-  await saveSettings({ remote: curRemote });
+  if (isLocalRemote(curRemote)) {
+    // 本地文件夹只在本次会话里有效，不写进设置，否则下次启动会指向一个没注册的根目录。
+    localMode = true;
+    document.body.classList.add('local-mode');
+  } else {
+    exitLocalMode();
+    await saveSettings({ remote: curRemote });
+  }
   stopPlayback();
   loadDir('');
 };
@@ -1715,6 +2150,7 @@ async function initialize() {
     $('ram-cache-gb').value = settings.ramCacheGb > 0 ? settings.ramCacheGb : '';
     $('ram-video-gb').value = settings.ramMaxVideoGb > 0 ? settings.ramMaxVideoGb : '';
     $('hold-seek-rate').value = String([0.5, 1, 2, 4, 8, 16].includes(Number(settings.holdSeekRate)) ? Number(settings.holdSeekRate) : 4);
+    setSpeed(SPEEDS.includes(Number(settings.playbackRate)) ? Number(settings.playbackRate) : 1, false);
     await refreshRamStatus();
     if (await loadRemotes()) await loadDir('');
   } catch (error) {
