@@ -1,0 +1,24 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - name: 安装依赖
+        # 测试只用到 electron/paths.js 和 electron/migration.js 这类纯 Node 模块，
+        # 不需要 Electron 二进制，跳过它的下载能省掉约 100MB 和一分钟
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - name: 跑测试
+        run: npm test
