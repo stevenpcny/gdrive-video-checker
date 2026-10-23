@@ -128,3 +128,30 @@ test('插值越糊，测出的细节尺度越小（这是细节量，不是标�
   const result = estimateEffectiveScale(smooth, { x: 0, y: 0, w: size, h: size });
   assert.ok(!result.confident || result.scale >= 4, `平滑画面应被判成细节尺度很小，实际 scale=${result.scale} confident=${result.confident}`);
 });
+
+test('自动对齐挑出差异最小的偏移，并判断结果可不可信', () => {
+  const { pickBestOffset } = require('../public/inspect');
+  // -2 帧处明显最小 → 可信
+  const clear = [
+    { offset: -3, diff: 9.1 }, { offset: -2, diff: 1.2 }, { offset: -1, diff: 7.8 },
+    { offset: 0, diff: 8.4 }, { offset: 1, diff: 9.0 }
+  ];
+  const picked = pickBestOffset(clear);
+  assert.equal(picked.offset, -2);
+  assert.equal(picked.confident, true);
+
+  // 各偏移差不多 → 不可信，不要瞎对齐
+  const flat = [
+    { offset: -1, diff: 5.0 }, { offset: 0, diff: 4.9 }, { offset: 1, diff: 5.1 }
+  ];
+  assert.equal(pickBestOffset(flat).confident, false);
+
+  // 只比次优好一点点也算不可信：中间丢过帧的片子就是这种形状
+  const weak = [
+    { offset: -1, diff: 3.05 }, { offset: 0, diff: 2.52 }, { offset: 1, diff: 3.4 }
+  ];
+  const weakPick = pickBestOffset(weak);
+  assert.equal(weakPick.offset, 0);
+  assert.equal(weakPick.confident, false, '2.52 vs 3.05 只好 17%，不该当成对上了');
+  assert.deepEqual(pickBestOffset([]), { offset: 0, confident: false, best: 0, runnerUp: 0 });
+});

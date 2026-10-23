@@ -131,6 +131,17 @@
   .insp-actions button { padding: 2px 8px; font-size: 11px; }
   .insp-actions button.on { background: var(--accent); border-color: var(--accent); color: #10131a; }
 
+  /* A/B 对比 */
+  #cmp-canvas { position: absolute; pointer-events: none; z-index: 6; }
+  #cmp-panel { border-top: 1px solid var(--border); padding: 6px 12px 8px; font-size: 12px; }
+  #cmp-src { width: 100%; margin-top: 5px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .cmp-label { color: var(--dim); align-self: center; }
+  #cmp-offset { color: var(--text); align-self: center; font-variant-numeric: tabular-nums; min-width: 42px; text-align: center; }
+  #cmp-status { color: var(--dim); margin-top: 5px; line-height: 1.5; white-space: pre-line; }
+  #cmp-status b { color: var(--text); }
+  #cmp-status .hit { color: var(--bad); }
+  body.cmp-wipe #player-wrap { cursor: ew-resize; }
+
   /* 穿帮点 / 区间循环 */
   /* 覆盖在进度条轨道上，所以放在 #seekbar 里而不是会裁剪的 #seek-track 里 */
   /* 琥珀色：进度条已播部分是蓝的，循环区间不能也用蓝 */

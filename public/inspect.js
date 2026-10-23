@@ -319,7 +319,22 @@
     return { kind: 'ok', base, peak, shaky, flickerRatio, text: '区间内帧间变化平稳，没有明显跳变或闪烁' };
   }
 
+  // 自动对齐：对每个候选偏移量出一组差异，取「平均差异最小」的那个。
+  // 返回片常见少 1 帧或整体偏几帧，对不齐的话 A/B 和差异图全是假象。
+  function pickBestOffset(scores) {
+    if (!Array.isArray(scores) || !scores.length) return { offset: 0, confident: false, best: 0, runnerUp: 0 };
+    const ranked = [...scores].sort((a, b) => a.diff - b.diff);
+    const best = ranked[0];
+    const others = ranked.filter(item => Math.abs(item.offset - best.offset) > 1);
+    const runnerUp = others.length ? others[0].diff : best.diff;
+    // 真正对上的偏移，差异会断崖式低于次优；只好 15% 那种多半是画面本身差异不大，
+    // 或者整条片子根本没有统一偏移（中间丢过帧），都不该当成可信结果。
+    const confident = runnerUp > 0 && best.diff <= runnerUp * 0.7;
+    return { offset: best.offset, best: best.diff, runnerUp, confident };
+  }
+
   return {
+    pickBestOffset,
     frameDiffStats,
     diffImage,
     laplacianVariance,

@@ -261,6 +261,7 @@ function render() {
     list.appendChild(el);
   });
 
+  if (cmpOn) fillCompareSources();
   const done = videos.filter(v => v.movedTo || marks[markKey(v)]).length;
   $('stats').textContent = videos.length ? `视频 ${videos.length} 个 · 已检查 ${done} 个` : '此文件夹没有视频';
   $('folder-done-btn').style.display = videos.length && done === videos.length ? 'block' : 'none';
@@ -556,7 +557,11 @@ function chainSeek(t) {
 }
 video.addEventListener('seeked', () => {
   if (pendingSeek !== null) { const t = pendingSeek; pendingSeek = null; video.currentTime = t; }
-  else if (zoomOn) requestAnimationFrame(drawZoom);
+  else {
+    if (zoomOn) requestAnimationFrame(drawZoom);
+    // 暂停逐帧看的时候，B 必须跟着 A 走，否则对比的是两个不同的帧
+    if (cmpOn && video.paused) syncCompare().then(drawCompare);
+  }
 });
 
 function scheduleDragSeek(t) {
@@ -1412,6 +1417,9 @@ document.addEventListener('keydown', e => {
   else if (k === 'z' || k === 'Z') { e.preventDefault(); toggleZoom(); }
   else if (k === 'r' || k === 'R') { e.preventDefault(); toggleRoi(); }
   else if (k === 's' || k === 'S') { e.preventDefault(); scanRange(); }
+  else if (k === 'c' || k === 'C') { e.preventDefault(); toggleCompare(); }
+  else if (k === 'x' || k === 'X') { e.preventDefault(); flipCompare(); }
+  else if (k === 'v' || k === 'V') { e.preventDefault(); cycleCompareMode(); }
   else if (k === 'Escape') { if (looping || loopIn !== null) { clearLoop(); toast('已清除区间', false); } }
   else if (k === 'ArrowUp') {
     e.preventDefault();
@@ -1658,21 +1666,25 @@ let scanVerdictText = '';
 const frameReady = () => video.readyState >= 2 && video.videoWidth > 0;
 
 // 抓一帧到 ImageData；maxWidth 控制精度与开销
-function grabFrame(maxWidth = 480) {
-  if (!frameReady()) return null;
-  const scale = Math.min(1, maxWidth / video.videoWidth);
-  const w = Math.max(2, Math.round(video.videoWidth * scale));
-  const h = Math.max(2, Math.round(video.videoHeight * scale));
-  if (grabCanvas.width !== w || grabCanvas.height !== h) {
-    grabCanvas.width = w;
-    grabCanvas.height = h;
+function grabFrameFrom(source, canvas, ctx, maxWidth) {
+  if (!source || source.readyState < 2 || !source.videoWidth) return null;
+  const scale = Math.min(1, maxWidth / source.videoWidth);
+  const w = Math.max(2, Math.round(source.videoWidth * scale));
+  const h = Math.max(2, Math.round(source.videoHeight * scale));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
   }
   try {
-    grabCtx.drawImage(video, 0, 0, w, h);
-    return grabCtx.getImageData(0, 0, w, h);
+    ctx.drawImage(source, 0, 0, w, h);
+    return ctx.getImageData(0, 0, w, h);
   } catch {
     return null; // 受保护内容等
   }
+}
+
+function grabFrame(maxWidth = 480) {
+  return frameReady() ? grabFrameFrom(video, grabCanvas, grabCtx, maxWidth) : null;
 }
 
 // 几个覆盖层要贴着画面实际显示的位置（视频在黑边里居中）
@@ -1684,6 +1696,16 @@ function videoBox() {
 
 function layoutOverlays() {
   const box = videoBox();
+  const cmp = $('cmp-canvas');
+  cmp.style.left = box.left + 'px';
+  cmp.style.top = box.top + 'px';
+  cmp.style.width = box.width + 'px';
+  cmp.style.height = box.height + 'px';
+  if (cmpOn) {
+    cmp.width = Math.max(2, Math.round(box.width));
+    cmp.height = Math.max(2, Math.round(box.height));
+    drawCompare();
+  }
   for (const el of [fxCanvas, $('roi-layer')]) {
     el.style.left = box.left + 'px';
     el.style.top = box.top + 'px';
@@ -1874,15 +1896,24 @@ function setInspectText(html) {
 }
 
 // 逐帧扫描区间：每帧 seek 后抓图，比相邻帧差异
-function seekAndGrab(frame) {
+function seekAndGrab(frame, width = 360) {
   return new Promise(resolve => {
     const done = () => {
       video.removeEventListener('seeked', done);
-      requestAnimationFrame(() => resolve(grabFrame(360)));
+      requestAnimationFrame(() => resolve(grabFrame(width)));
     };
     video.addEventListener('seeked', done);
     pendingSeek = null;
     video.currentTime = (frame + 0.5) * frameDur;
+  });
+}
+
+function seekB(time) {
+  return new Promise(resolve => {
+    const done = () => { videoB.removeEventListener('seeked', done); resolve(); };
+    videoB.addEventListener('seeked', done);
+    videoB.currentTime = time;
+    setTimeout(done, 800);
   });
 }
 
@@ -1980,6 +2011,7 @@ $('roi-btn').onclick = toggleRoi;
 
 function resetInspectTools() {
   stopDiffView();
+  if (cmpOn) closeCompare();
   $('scan-chart').hidden = true;
   if (zoomOn) toggleZoom();
   if (roiOn) toggleRoi();
@@ -1987,6 +2019,303 @@ function resetInspectTools() {
   roiRect = null;
   renderRoiBox();
   $('inspect-panel').hidden = true;
+}
+
+// ---------- A/B 对比：成片(A) vs 原片(B) ----------
+const videoB = $('video-b');
+const cmpCanvas = $('cmp-canvas');
+const cmpCtx = cmpCanvas.getContext('2d');
+const grabCanvasB = document.createElement('canvas');
+const grabCtxB = grabCanvasB.getContext('2d', { willReadFrequently: true });
+const diffCanvas = document.createElement('canvas');
+const diffCtx = diffCanvas.getContext('2d');
+
+let cmpOn = false;
+let cmpMode = 'toggle';
+let cmpOffset = 0;        // 以 A 的帧为单位
+let cmpShowB = false;
+let cmpWipe = 0.5;
+let cmpWipeDrag = false;
+let cmpName = '';
+let cmpRaf = 0;
+
+const cmpTimeFor = () => Math.max(0, video.currentTime + cmpOffset * frameDur);
+
+function cmpSetStatus(text) {
+  $('cmp-status').innerHTML = text;
+}
+
+function fillCompareSources() {
+  const select = $('cmp-src');
+  const current = select.value;
+  const options = ['<option value="">选对照片（原片）…</option>'];
+  videos.forEach((v, index) => {
+    if (index === curIdx) return;
+    options.push(`<option value="${index}"></option>`);
+  });
+  select.innerHTML = options.join('');
+  [...select.options].forEach(option => {
+    if (option.value) option.textContent = videos[Number(option.value)].Name;
+  });
+  if (current && select.querySelector(`option[value="${current}"]`)) select.value = current;
+}
+
+async function openCompare() {
+  if (curIdx < 0) return toast('先选一个要检查的视频', false);
+  cmpOn = true;
+  $('cmp-panel').hidden = false;
+  cmpCanvas.hidden = false;
+  fillCompareSources();
+  layoutOverlays();
+  if (!videoB.getAttribute('src')) cmpSetStatus('选一条原片作为对照，然后用 X 翻、V 换方式');
+  startCompareLoop();
+}
+
+function closeCompare() {
+  cmpOn = false;
+  cmpShowB = false;
+  $('cmp-panel').hidden = true;
+  cmpCanvas.hidden = true;
+  document.body.classList.remove('cmp-wipe');
+  if (cmpRaf) { cancelAnimationFrame(cmpRaf); cmpRaf = 0; }
+  videoB.pause();
+  videoB.removeAttribute('src');
+  videoB.load();
+  cmpName = '';
+}
+
+function toggleCompare() {
+  if (cmpOn) closeCompare();
+  else openCompare();
+}
+
+async function loadCompareSource(index) {
+  const entry = videos[index];
+  if (!entry) return;
+  cmpName = entry.Name;
+  videoB.src = streamUrl(curRemote, pathOf(entry));
+  cmpSetStatus(`正在载入对照片 ${entry.Name}…`);
+  await new Promise(resolve => {
+    const done = () => { videoB.removeEventListener('loadeddata', done); resolve(); };
+    videoB.addEventListener('loadeddata', done);
+    setTimeout(done, 8000);
+  });
+  if (!videoB.videoWidth) {
+    cmpSetStatus(`<span class="hit">对照片载不进来，可能本机解不了这个编码</span>`);
+    return;
+  }
+  await syncCompare();
+  describeCompare();
+}
+
+function describeCompare(extra = '') {
+  const sizeMismatch = videoB.videoWidth !== video.videoWidth || videoB.videoHeight !== video.videoHeight;
+  const lenA = video.duration ? Math.round(video.duration / frameDur) : 0;
+  const lenB = videoB.duration ? Math.round(videoB.duration / frameDur) : 0;
+  const lines = [`对照片：<b>${cmpName}</b>`];
+  if (sizeMismatch) {
+    lines.push(`<span class="hit">尺寸不一致：成片 ${video.videoWidth}×${video.videoHeight}，原片 ${videoB.videoWidth}×${videoB.videoHeight}</span>`);
+  }
+  if (lenA && lenB && lenA !== lenB) {
+    lines.push(`<span class="hit">总帧数不一致：成片 ${lenA} 帧，原片 ${lenB} 帧（差 ${lenA - lenB} 帧）</span>`);
+  }
+  if (extra) lines.push(extra);
+  cmpSetStatus(lines.join('\n'));
+}
+
+// 暂停时逐帧对齐；播放时让 B 跟着跑，偏差大了再纠一次
+function syncCompare() {
+  if (!videoB.getAttribute('src') || !videoB.duration) return Promise.resolve();
+  const target = Math.min(Math.max(0, videoB.duration - 0.001), cmpTimeFor());
+  if (video.paused) {
+    videoB.pause();
+    if (Math.abs(videoB.currentTime - target) < frameDur / 4) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => { videoB.removeEventListener('seeked', done); resolve(); };
+      videoB.addEventListener('seeked', done);
+      videoB.currentTime = target;
+      setTimeout(done, 1500);
+    });
+  }
+  videoB.playbackRate = video.playbackRate;
+  if (Math.abs(videoB.currentTime - target) > frameDur * 1.5) videoB.currentTime = target;
+  if (videoB.paused) videoB.play().catch(() => {});
+  return Promise.resolve();
+}
+
+function drawCompare() {
+  if (!cmpOn) return;
+  const w = cmpCanvas.width;
+  const h = cmpCanvas.height;
+  cmpCtx.clearRect(0, 0, w, h);
+  if (!videoB.videoWidth) return;
+  if (cmpMode === 'toggle') {
+    if (cmpShowB) {
+      cmpCtx.drawImage(videoB, 0, 0, w, h);
+      badge('原片 B', 0);
+    }
+    return;
+  }
+  if (cmpMode === 'wipe') {
+    const split = Math.round(w * cmpWipe);
+    cmpCtx.save();
+    cmpCtx.beginPath();
+    cmpCtx.rect(split, 0, w - split, h);
+    cmpCtx.clip();
+    cmpCtx.drawImage(videoB, 0, 0, w, h);
+    cmpCtx.restore();
+    cmpCtx.strokeStyle = '#ffb84d';
+    cmpCtx.lineWidth = 2;
+    cmpCtx.beginPath();
+    cmpCtx.moveTo(split, 0);
+    cmpCtx.lineTo(split, h);
+    cmpCtx.stroke();
+    badge('成片 A', 0);
+    badge('原片 B', split + 6);
+    return;
+  }
+  // 差异图：两片相减放大，补丁范围会整块亮起来
+  const a = grabFrame(480);
+  const b = grabFrameFrom(videoB, grabCanvasB, grabCtxB, 480);
+  if (!a || !b || a.width !== b.width || a.height !== b.height) return;
+  if (diffCanvas.width !== a.width || diffCanvas.height !== a.height) {
+    diffCanvas.width = a.width;
+    diffCanvas.height = a.height;
+  }
+  const out = diffCtx.createImageData(a.width, a.height);
+  INSPECT.diffImage(b, a, 6, out.data);
+  diffCtx.putImageData(out, 0, 0);
+  cmpCtx.drawImage(diffCanvas, 0, 0, w, h);
+  badge('差异 |A−B|', 0);
+}
+
+function badge(text, x) {
+  cmpCtx.fillStyle = 'rgba(0,0,0,.55)';
+  cmpCtx.fillRect(x + 6, 6, 78, 18);
+  cmpCtx.fillStyle = '#e8eaed';
+  cmpCtx.font = '12px system-ui';
+  cmpCtx.fillText(text, x + 11, 19);
+}
+
+function startCompareLoop() {
+  if (cmpRaf) cancelAnimationFrame(cmpRaf);
+  const tick = () => {
+    if (!cmpOn) return;
+    if (videoB.getAttribute('src')) {
+      if (!video.paused) syncCompare();
+      drawCompare();
+    }
+    cmpRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+// 自动对齐：在候选偏移里找整体差异最小的那个
+async function autoAlign() {
+  if (!videoB.videoWidth) return toast('先选一条对照片', false);
+  const wasPaused = video.paused;
+  video.pause();
+  videoB.pause();
+  cmpSetStatus('正在对齐…');
+  const anchorFrames = [0.3, 0.5, 0.7].map(ratio => Math.round((video.duration * ratio) / frameDur));
+  const SEARCH = 10;
+  const offsets = [];
+  for (let offset = -SEARCH; offset <= SEARCH; offset++) offsets.push(offset);
+  // A 的锚点帧只抓一次：原来每个偏移都重新 seek 一遍 A，白白多花一倍时间
+  const anchors = [];
+  for (const frame of anchorFrames) {
+    const a = await seekAndGrab(frame, 240);
+    if (a) anchors.push({ frame, a });
+  }
+  const perAnchor = anchors.map(() => []);
+  const totals = new Map();
+  let step = 0;
+  for (const [anchorIndex, anchor] of anchors.entries()) {
+    for (const offset of offsets) {
+      const tB = (anchor.frame + offset + 0.5) * frameDur;
+      if (tB < 0 || tB > videoB.duration) continue;
+      await seekB(tB);
+      const b = grabFrameFrom(videoB, grabCanvasB, grabCtxB, 240);
+      if (!b || b.width !== anchor.a.width) continue;
+      const mean = INSPECT.frameDiffStats(anchor.a, b).mean;
+      perAnchor[anchorIndex].push({ offset, diff: mean });
+      const bucket = totals.get(offset) || { sum: 0, used: 0 };
+      bucket.sum += mean;
+      bucket.used++;
+      totals.set(offset, bucket);
+      if (!(++step % 6)) cmpSetStatus(`对齐中… ${step}/${anchors.length * offsets.length}`);
+    }
+  }
+  const scores = [...totals.entries()].map(([offset, bucket]) => ({ offset, diff: bucket.sum / bucket.used }));
+  const picked = INSPECT.pickBestOffset(scores);
+  if (!scores.length) return cmpSetStatus('<span class="hit">对不了：取不到画面</span>');
+  cmpOffset = picked.offset;
+  $('cmp-offset').textContent = cmpOffset + ' 帧';
+  await syncCompare();
+  // 片头/片中/片尾分别量一次：三处对不上同一个偏移，说明中间丢过帧
+  const spots = perAnchor
+    .map((list, index) => ({ list, frame: anchors[index].frame }))
+    .filter(item => item.list.length)
+    .map(item => ({ frame: item.frame, ...INSPECT.pickBestOffset(item.list) }));
+  const distinct = [...new Set(spots.map(spot => spot.offset))];
+  const lines = [];
+  if (distinct.length > 1) {
+    lines.push(`<span class="hit">不同位置量出的偏移不一致</span>：${spots.map(spot => `第 ${spot.frame + 1} 帧处 ${spot.offset}`).join('、')} —— 中间多半丢过帧，没有统一偏移`);
+  }
+  if (Math.abs(picked.offset) >= SEARCH || spots.some(spot => Math.abs(spot.offset) >= SEARCH)) {
+    lines.push(`<span class="hit">偏移顶到了 ±${SEARCH} 帧的搜索上限</span>，真实偏移可能更大`);
+  }
+  lines.push(picked.confident
+    ? `自动对齐：偏移 <b>${picked.offset} 帧</b>（差异 ${picked.best.toFixed(2)}，次优 ${picked.runnerUp.toFixed(2)}）`
+    : `<span class="hit">这个偏移不可信</span>：最优 ${picked.best.toFixed(2)} vs 次优 ${picked.runnerUp.toFixed(2)}，差距太小，已按 ${picked.offset} 帧设置，请自己核对`);
+  describeCompare(lines.join('\n'));
+  if (!wasPaused) video.play().catch(() => {});
+}
+
+$('cmp-src').onchange = e => { if (e.target.value) loadCompareSource(Number(e.target.value)); };
+$('cmp-close-btn').onclick = closeCompare;
+$('cmp-off-minus').onclick = async () => { cmpOffset--; $('cmp-offset').textContent = cmpOffset + ' 帧'; await syncCompare(); drawCompare(); };
+$('cmp-off-plus').onclick = async () => { cmpOffset++; $('cmp-offset').textContent = cmpOffset + ' 帧'; await syncCompare(); drawCompare(); };
+$('cmp-auto').onclick = autoAlign;
+
+document.querySelectorAll('.cmp-modes button').forEach(button => {
+  button.onclick = () => setCompareMode(button.dataset.mode);
+});
+
+function setCompareMode(mode) {
+  cmpMode = mode;
+  document.querySelectorAll('.cmp-modes button').forEach(button => {
+    button.classList.toggle('on', button.dataset.mode === mode);
+  });
+  document.body.classList.toggle('cmp-wipe', mode === 'wipe');
+  drawCompare();
+}
+
+function cycleCompareMode() {
+  if (!cmpOn) return;
+  const modes = ['toggle', 'wipe', 'diff'];
+  setCompareMode(modes[(modes.indexOf(cmpMode) + 1) % modes.length]);
+}
+
+function flipCompare() {
+  if (!cmpOn || !videoB.videoWidth) return;
+  if (cmpMode !== 'toggle') setCompareMode('toggle');
+  cmpShowB = !cmpShowB;
+  drawCompare();
+}
+
+$('player-wrap').addEventListener('pointerdown', e => {
+  if (!cmpOn || cmpMode !== 'wipe') return;
+  cmpWipeDrag = true;
+  moveWipe(e);
+});
+$('player-wrap').addEventListener('pointermove', e => { if (cmpWipeDrag) moveWipe(e); });
+document.addEventListener('pointerup', () => { cmpWipeDrag = false; });
+
+function moveWipe(e) {
+  const rect = video.getBoundingClientRect();
+  cmpWipe = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  drawCompare();
 }
 
 // ---------- 跳帧 / 区间循环 ----------
