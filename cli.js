@@ -123,17 +123,27 @@ function parseArgs(argv) {
 const HELP = `穿帮检查命令行（帧号从 0 开始，区间是 [from, to) 左闭右开）
 
   node cli.js probe   <文件>
-  node cli.js scan    <文件> --from 110 --to 136 [--width 360]
+  node cli.js scan    <文件> --from 110 --to 136 [--rect x,y,w,h] [--width 360]
   node cli.js compare <成片> <原片> [--frame N] [--offset N] [--align] [--width 360]
   node cli.js roi     <文件> --frame 60 --rect x,y,w,h
 
 公共选项
-  --width N   分析用的缩放宽度，默认 360（roi 固定用原始像素）
+  --width N   分析用的缩放宽度，默认 360（roi 固定用原始像素；scan 给了 --rect 时默认原始像素）
+  --rect      只在这块区域内扫描，并自动取一块同尺寸的区外对照区做归因。
+              补丁占画幅 ≤2% 时全画幅扫描会把它的闪烁稀释到判不出来
   --ffmpeg 或 VIDEO_CHECKER_FFMPEG 指定 ffmpeg，默认用 vendor/bin 里自带的
 
 输出全是 JSON；出错时 {"ok":false,"error":...} 且退出码为 1。
 注意：所有数值字段的帧号从 0 开始；verdict.text 是给人看的句子，里面的帧号是 +1 后的
 界面编号（同时给了 peakFrame 和 peakFrameDisplay 两个字段，别弄混）。`;
+
+function parseRect(value, label) {
+  const parts = String(value || '').split(',').map(Number);
+  if (parts.length !== 4 || parts.some(v => !Number.isFinite(v))) {
+    throw new Error(`${label} 要写成 x,y,w,h（原始像素坐标）`);
+  }
+  return { x: parts[0], y: parts[1], w: parts[2], h: parts[3] };
+}
 
 async function cmdProbe(file) {
   const info = await probe(file);
@@ -142,49 +152,65 @@ async function cmdProbe(file) {
 
 async function cmdScan(file, flags) {
   const info = await probe(file);
-  const width = Number(flags.width) || 360;
+  const rect = flags.rect ? parseRect(flags.rect, '--rect') : null;
+  // 给了 --rect 就默认用原始像素：补丁缩到 360 宽只剩十几个像素，接缝量不准。
+  const width = Number(flags.width) || (rect ? info.width : 360);
   const from = Math.max(0, Number(flags.from) || 0);
   const to = flags.to !== undefined ? Number(flags.to) : Math.min(info.frames, from + 31);
   if (!(to > from + 1)) throw new Error('区间太短，至少要 2 帧');
+  const scale = width / info.width;
+  const scaled = rect ? {
+    x: Math.round(rect.x * scale), y: Math.round(rect.y * scale),
+    w: Math.max(2, Math.round(rect.w * scale)), h: Math.max(2, Math.round(rect.h * scale))
+  } : null;
+  const control = scaled ? INSPECT.controlRect(scaled, width, evenHeight(info, width)) : null;
+  const sampler = INSPECT.createScanSampler({ rect: scaled, control });
   const samples = [];
-  let prev = null;
-  let prev2 = null;
+  const seamSeries = [];
   await readFrames(file, info, {
     startFrame: from,
     count: to - from,
     width,
     onFrame: frame => {
-      if (prev) {
-        const stats = INSPECT.frameDiffStats(prev, frame);
-        // 隔一帧的差异：隔帧闪烁会让 mean 反而大于 mean2
-        if (prev2) stats.mean2 = INSPECT.frameDiffStats(prev2, frame).mean;
-        samples.push({ frame: frame.frame, ...stats });
+      const sample = sampler.push(frame.frame, frame);
+      if (sample) samples.push(sample);
+      if (scaled) {
+        // 每帧量一次接缝台阶，用来判边界呼吸
+        const profile = INSPECT.edgeStepProfile(frame, scaled);
+        const edges = Object.values(profile).filter(Boolean);
+        seamSeries.push(edges.length ? Math.max(...edges.map(e => e.runStep)) : 0);
       }
-      prev2 = prev;
-      prev = frame;
     }
   });
-  const verdict = INSPECT.scanVerdict(samples);
+  const verdict = INSPECT.scanVerdict(samples, scaled ? { scope: '补丁区' } : {});
+  const breathing = scaled ? INSPECT.breathingVerdict(seamSeries) : null;
   emit({
     file,
     range: { from, to, frameBase: 0, note: '[from, to) 左闭右开' },
     fps: info.fps,
+    rect: rect || null,
+    control: control && !flags.width ? { x: Math.round(control.x / scale), y: Math.round(control.y / scale), w: Math.round(control.w / scale), h: Math.round(control.h / scale) } : control,
+    scope: scaled ? 'rect' : 'frame',
     verdict: {
       kind: verdict.kind,
       text: verdict.text,
       base: verdict.base,
       flickerRatio: verdict.flickerRatio,
+      localized: verdict.localized,
       peakFrame: verdict.peak ? verdict.peak.frame : null,
       peakFrameDisplay: verdict.peak ? verdict.peak.frame + 1 : null,
       peakRatio: verdict.peak ? verdict.peak.ratio : null,
       textFrameBase: 1
     },
+    controlVerdict: verdict.control ? { kind: verdict.control.kind, text: verdict.control.text } : null,
+    breathing: breathing && { kind: breathing.kind, text: breathing.text, cv: Number(breathing.cv.toFixed(3)) },
     samples: samples.map(item => ({
       frame: item.frame,
       mean: Number(item.mean.toFixed(4)),
       p99: item.p99,
       max: Number(item.max.toFixed(2)),
-      mean2: item.mean2 === undefined ? null : Number(item.mean2.toFixed(4))
+      mean2: item.mean2 === undefined ? null : Number(item.mean2.toFixed(4)),
+      controlMean: item.control ? Number(item.control.mean.toFixed(4)) : null
     }))
   });
 }
@@ -270,14 +296,13 @@ async function cmdCompare(fileA, fileB, flags) {
 async function cmdRoi(file, flags) {
   const info = await probe(file);
   const frame = Number(flags.frame) || 0;
-  const parts = String(flags.rect || '').split(',').map(Number);
-  if (parts.length !== 4 || parts.some(value => !Number.isFinite(value))) {
-    throw new Error('--rect 要写成 x,y,w,h（原始像素坐标）');
-  }
+  const rect = parseRect(flags.rect, '--rect');
   // 清晰度和色差必须用原始像素，不能缩放
   const full = await readOneFrame(file, info, frame, info.width);
   if (!full) throw new Error('取不到这一帧');
-  const result = INSPECT.analyzeSelection(full, { x: parts[0], y: parts[1], w: parts[2], h: parts[3] });
+  const result = INSPECT.analyzeSelection(full, rect);
+  const stepProfile = INSPECT.edgeStepProfile(full, rect);
+  const stepVerdict = INSPECT.seamStepVerdict(stepProfile);
   emit({
     file,
     frame,
@@ -303,6 +328,24 @@ async function cmdRoi(file, flags) {
       dy: Number(result.seam.dy.toFixed(2)),
       maxDelta: Number(result.seamMaxDelta.toFixed(2)),
       verdict: result.seamVerdict
+    },
+    // 接缝台阶：量「跨边的梯度台阶 vs 边外本地梯度」，抓的是硬边和切断。
+    // 和上面的 seam 分工：seam 比内外均值(偏色)，这里比梯度(硬边)。
+    seamStep: {
+      kind: stepVerdict.kind,
+      verdict: stepVerdict.text,
+      worst: stepVerdict.worst && {
+        edge: stepVerdict.worst.edge,
+        runRatio: Number(stepVerdict.worst.runRatio.toFixed(2)),
+        run: Number(stepVerdict.worst.run.toFixed(3)),
+        step: Number(stepVerdict.worst.step.toFixed(2)),
+        noise: Number(stepVerdict.worst.noise.toFixed(2))
+      },
+      edges: Object.fromEntries(Object.entries(stepProfile).map(([k, v]) => [k, v && {
+        runRatio: Number(v.runRatio.toFixed(2)),
+        run: Number(v.run.toFixed(3)),
+        coverage: Number(v.coverage.toFixed(3))
+      }]))
     }
   });
 }
