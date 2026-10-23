@@ -10,6 +10,7 @@ let loopOut = null;      // 区间尾帧(含)
 let looping = false;
 const DESKTOP = window.videoCheckerDesktop || null;
 const { makeItem: makeBatchItem, validateMoveTarget } = window.BatchOps;
+const INSPECT = window.Inspect;
 const AUTO_FIT_WINDOW = !!DESKTOP || new URLSearchParams(location.search).has('standalone');
 const $ = id => document.getElementById(id);
 const video = $('video');
@@ -314,6 +315,7 @@ function play(i) {
   $('player-wrap').classList.add('has-video');
   resetLoader();
   clearLoop();
+  resetInspectTools();
   video.src = streamUrl(curRemote, pathOf(v));
   loadMediaInfo(v, mediaSeq);
   renderFlags();
@@ -554,6 +556,7 @@ function chainSeek(t) {
 }
 video.addEventListener('seeked', () => {
   if (pendingSeek !== null) { const t = pendingSeek; pendingSeek = null; video.currentTime = t; }
+  else if (zoomOn) requestAnimationFrame(drawZoom);
 });
 
 function scheduleDragSeek(t) {
@@ -671,10 +674,11 @@ video.addEventListener('loadedmetadata', () => {
   renderFlags();
   renderLoop();
   updateNavHitAreas();
+  layoutOverlays();
   fitWindowToVideo(++fitWindowSeq);
 });
 video.addEventListener('click', () => video.paused ? video.play() : video.pause());
-window.addEventListener('resize', updateNavHitAreas);
+window.addEventListener('resize', () => { updateNavHitAreas(); layoutOverlays(); });
 
 // ---------- 重命名 / 删除 / 上传 ----------
 // 变更后重载当前目录，并按名字复位正在播放的视频(不打断播放)。activeName 显式指定复位目标
@@ -1404,6 +1408,10 @@ document.addEventListener('keydown', e => {
   else if (k === 'i' || k === 'I') { e.preventDefault(); setLoopEdge('in'); }
   else if (k === 'o' || k === 'O') { e.preventDefault(); setLoopEdge('out'); }
   else if (k === 'l' || k === 'L') { e.preventDefault(); toggleLoop(); }
+  else if (k === 'd' || k === 'D') { e.preventDefault(); toggleDiffView(); }
+  else if (k === 'z' || k === 'Z') { e.preventDefault(); toggleZoom(); }
+  else if (k === 'r' || k === 'R') { e.preventDefault(); toggleRoi(); }
+  else if (k === 's' || k === 'S') { e.preventDefault(); scanRange(); }
   else if (k === 'Escape') { if (looping || loopIn !== null) { clearLoop(); toast('已清除区间', false); } }
   else if (k === 'ArrowUp') {
     e.preventDefault();
@@ -1625,6 +1633,361 @@ $('flag-copy-btn').onclick = async () => {
   if (await writeClipboard(rows.join('\n'))) toast(`已复制 ${rows.length} 个穿帮点（文件名/帧号/时间）`, false);
   else toast('复制失败，请检查剪贴板权限', false);
 };
+
+// ---------- 查穿帮：差分 / 放大镜 / 框选 / 区间扫描 ----------
+const grabCanvas = document.createElement('canvas');
+const grabCtx = grabCanvas.getContext('2d', { willReadFrequently: true });
+const fxCanvas = $('fx-canvas');
+const fxCtx = fxCanvas.getContext('2d');
+const zoomCanvas = $('zoom-canvas');
+const zoomCtx = zoomCanvas.getContext('2d');
+
+let diffOn = false;
+let zoomOn = false;
+let zoomFactor = 4;
+let zoomPoint = null;
+let roiOn = false;
+let roiRect = null;        // 视频源像素坐标
+let roiDrag = null;
+let prevGrab = null;
+let diffHandle = 0;
+let scanning = false;
+let scanSamples = [];
+let scanVerdictText = '';
+
+const frameReady = () => video.readyState >= 2 && video.videoWidth > 0;
+
+// 抓一帧到 ImageData；maxWidth 控制精度与开销
+function grabFrame(maxWidth = 480) {
+  if (!frameReady()) return null;
+  const scale = Math.min(1, maxWidth / video.videoWidth);
+  const w = Math.max(2, Math.round(video.videoWidth * scale));
+  const h = Math.max(2, Math.round(video.videoHeight * scale));
+  if (grabCanvas.width !== w || grabCanvas.height !== h) {
+    grabCanvas.width = w;
+    grabCanvas.height = h;
+  }
+  try {
+    grabCtx.drawImage(video, 0, 0, w, h);
+    return grabCtx.getImageData(0, 0, w, h);
+  } catch {
+    return null; // 受保护内容等
+  }
+}
+
+// 几个覆盖层要贴着画面实际显示的位置（视频在黑边里居中）
+function videoBox() {
+  const wrap = $('player-wrap').getBoundingClientRect();
+  const rect = video.getBoundingClientRect();
+  return { left: rect.left - wrap.left, top: rect.top - wrap.top, width: rect.width, height: rect.height };
+}
+
+function layoutOverlays() {
+  const box = videoBox();
+  for (const el of [fxCanvas, $('roi-layer')]) {
+    el.style.left = box.left + 'px';
+    el.style.top = box.top + 'px';
+    el.style.width = box.width + 'px';
+    el.style.height = box.height + 'px';
+  }
+  renderRoiBox();
+}
+
+function stopDiffView() {
+  diffOn = false;
+  prevGrab = null;
+  fxCanvas.hidden = true;
+  $('diff-btn').classList.remove('on');
+  if (diffHandle) {
+    if (video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(diffHandle);
+    else cancelAnimationFrame(diffHandle);
+    diffHandle = 0;
+  }
+}
+
+function toggleDiffView() {
+  if (diffOn) {
+    stopDiffView();
+    setInspectText('');
+    return;
+  }
+  if (!frameReady()) return toast('这个视频本机解不了码，差分视图用不了', false);
+  diffOn = true;
+  prevGrab = null;
+  fxCanvas.hidden = false;
+  $('diff-btn').classList.add('on');
+  layoutOverlays();
+  const tick = () => {
+    if (!diffOn) return;
+    const cur = grabFrame(480);
+    if (cur) {
+      if (fxCanvas.width !== cur.width || fxCanvas.height !== cur.height) {
+        fxCanvas.width = cur.width;
+        fxCanvas.height = cur.height;
+      }
+      if (prevGrab && prevGrab.width === cur.width) {
+        const out = fxCtx.createImageData(cur.width, cur.height);
+        INSPECT.diffImage(prevGrab, cur, Number($('speed-sel').dataset.gain || 8), out.data);
+        fxCtx.putImageData(out, 0, 0);
+        const stats = INSPECT.frameDiffStats(prevGrab, cur);
+        setInspectText(`差分视图：整体抖动 <b>${stats.mean.toFixed(2)}</b>　局部峰值 <b>${stats.max.toFixed(0)}</b>\n亮的地方=这一帧变了；接缝整条发亮就是闪烁，人物边缘出现双线就是重影/错位`);
+      }
+      prevGrab = cur;
+    }
+    diffHandle = video.requestVideoFrameCallback
+      ? video.requestVideoFrameCallback(tick)
+      : requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function toggleZoom() {
+  zoomOn = !zoomOn;
+  zoomCanvas.hidden = !zoomOn;
+  $('zoom-btn').classList.toggle('on', zoomOn);
+  if (!zoomOn) return;
+  if (!frameReady()) {
+    zoomOn = false;
+    zoomCanvas.hidden = true;
+    $('zoom-btn').classList.remove('on');
+    return toast('这个视频本机解不了码，放大镜用不了', false);
+  }
+  zoomCanvas.width = 260;
+  zoomCanvas.height = 260;
+  drawZoom();
+}
+
+function drawZoom() {
+  if (!zoomOn || !frameReady()) return;
+  const box = videoBox();
+  const point = zoomPoint || { x: box.width / 2, y: box.height / 2 };
+  const sx = point.x / box.width * video.videoWidth;
+  const sy = point.y / box.height * video.videoHeight;
+  const span = zoomCanvas.width / zoomFactor;
+  zoomCtx.imageSmoothingEnabled = false;
+  zoomCtx.fillStyle = '#000';
+  zoomCtx.fillRect(0, 0, zoomCanvas.width, zoomCanvas.height);
+  try {
+    zoomCtx.drawImage(video, sx - span / 2, sy - span / 2, span, span, 0, 0, zoomCanvas.width, zoomCanvas.height);
+  } catch { /* 解不了码就留黑 */ }
+  zoomCtx.strokeStyle = 'rgba(255,184,77,.9)';
+  zoomCtx.strokeRect(zoomCanvas.width / 2 - 6, zoomCanvas.height / 2 - 6, 12, 12);
+  zoomCtx.fillStyle = 'rgba(0,0,0,.6)';
+  zoomCtx.fillRect(0, zoomCanvas.height - 16, 56, 16);
+  zoomCtx.fillStyle = '#e8eaed';
+  zoomCtx.font = '11px system-ui';
+  zoomCtx.fillText(zoomFactor + '×', 6, zoomCanvas.height - 4);
+}
+
+function toggleRoi() {
+  roiOn = !roiOn;
+  $('roi-layer').hidden = !roiOn;
+  $('roi-btn').classList.toggle('on', roiOn);
+  if (roiOn) {
+    layoutOverlays();
+    setInspectText('在画面上拖一个框圈住补丁区域，松手出结果');
+  } else {
+    roiRect = null;
+    renderRoiBox();
+  }
+}
+
+function renderRoiBox() {
+  const box = $('roi-box');
+  if (!roiRect || !video.videoWidth) { box.hidden = true; return; }
+  const view = videoBox();
+  box.hidden = false;
+  box.style.left = (roiRect.x / video.videoWidth * view.width) + 'px';
+  box.style.top = (roiRect.y / video.videoHeight * view.height) + 'px';
+  box.style.width = (roiRect.w / video.videoWidth * view.width) + 'px';
+  box.style.height = (roiRect.h / video.videoHeight * view.height) + 'px';
+}
+
+function analyzeRoi() {
+  if (!roiRect) return;
+  const frame = grabFrame(video.videoWidth); // 清晰度/色差要用原始像素
+  if (!frame) return setInspectText('取不到画面像素，可能是本机解不了这个编码');
+  const result = INSPECT.analyzeSelection(frame, roiRect);
+  const upscaled = result.effective.confident && result.effective.scale > 1;
+  setInspectText([
+    `选区 <b>${result.width}×${result.height}</b> 像素`,
+    `清晰度：区内 ${result.innerSharp.toFixed(1)} / 周围 ${result.ringSharp.toFixed(1)} → <b>${result.sharpVerdict}</b>`,
+    `实际细节：<b class="${upscaled ? 'hit' : ''}">${result.effectiveVerdict}</b>`,
+    `色差：<b class="${result.seamMaxDelta >= 8 ? 'hit' : ''}">${result.seamVerdict}</b>`
+  ].join('\n'));
+}
+
+$('roi-layer').addEventListener('pointerdown', e => {
+  if (!video.videoWidth) return;
+  const view = videoBox();
+  const rect = $('roi-layer').getBoundingClientRect();
+  roiDrag = {
+    x: (e.clientX - rect.left) / view.width * video.videoWidth,
+    y: (e.clientY - rect.top) / view.height * video.videoHeight
+  };
+  $('roi-layer').setPointerCapture(e.pointerId);
+});
+
+$('player-wrap').addEventListener('pointermove', e => {
+  if (!zoomOn) return;
+  const rect = video.getBoundingClientRect();
+  zoomPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  drawZoom();
+});
+
+$('roi-layer').addEventListener('pointermove', e => {
+  if (!roiDrag) return;
+  const view = videoBox();
+  const rect = $('roi-layer').getBoundingClientRect();
+  const px = (e.clientX - rect.left) / view.width * video.videoWidth;
+  const py = (e.clientY - rect.top) / view.height * video.videoHeight;
+  roiRect = {
+    x: Math.min(roiDrag.x, px),
+    y: Math.min(roiDrag.y, py),
+    w: Math.abs(px - roiDrag.x),
+    h: Math.abs(py - roiDrag.y)
+  };
+  renderRoiBox();
+});
+
+$('roi-layer').addEventListener('pointerup', () => {
+  if (!roiDrag) return;
+  roiDrag = null;
+  if (roiRect && roiRect.w > 8 && roiRect.h > 8) analyzeRoi();
+  else { roiRect = null; renderRoiBox(); }
+});
+
+$('player-wrap').addEventListener('wheel', e => {
+  if (!zoomOn) return;
+  e.preventDefault();
+  const steps = [2, 4, 8, 16];
+  const index = steps.indexOf(zoomFactor);
+  zoomFactor = steps[Math.min(steps.length - 1, Math.max(0, index + (e.deltaY > 0 ? -1 : 1)))];
+  drawZoom();
+}, { passive: false });
+
+function setInspectText(html) {
+  const panel = $('inspect-panel');
+  $('inspect-text').innerHTML = html;
+  $('scan-chart').hidden = !scanSamples.length;
+  panel.hidden = !html && !scanSamples.length;
+}
+
+// 逐帧扫描区间：每帧 seek 后抓图，比相邻帧差异
+function seekAndGrab(frame) {
+  return new Promise(resolve => {
+    const done = () => {
+      video.removeEventListener('seeked', done);
+      requestAnimationFrame(() => resolve(grabFrame(360)));
+    };
+    video.addEventListener('seeked', done);
+    pendingSeek = null;
+    video.currentTime = (frame + 0.5) * frameDur;
+  });
+}
+
+async function scanRange() {
+  if (scanning) return;
+  if (!frameReady()) return toast('这个视频本机解不了码，扫描用不了', false);
+  const base = targetFrame();
+  const from = loopIn !== null ? loopIn : Math.max(0, base - 10);
+  const to = loopOut !== null ? loopOut : from + 20;
+  const last = Math.max(0, Math.round(video.duration / frameDur) - 1);
+  const end = Math.min(last, to);
+  if (end - from < 2) return toast('区间太短，先用 I/O 设一个区间', false);
+  scanning = true;
+  video.pause();
+  stopDiffView();
+  $('scan-btn').classList.add('on');
+  setInspectText(`扫描第 ${from + 1}–${end + 1} 帧…`);
+  const samples = [];
+  let prev = null;
+  let prev2 = null;
+  try {
+    for (let frame = from; frame <= end; frame++) {
+      const cur = await seekAndGrab(frame);
+      if (!cur) break;
+      if (prev) {
+        const stats = INSPECT.frameDiffStats(prev, cur);
+        // 同时记隔一帧的差异：隔帧闪烁会让 mean 反而比 mean2 更大
+        if (prev2) stats.mean2 = INSPECT.frameDiffStats(prev2, cur).mean;
+        samples.push({ frame, ...stats });
+      }
+      prev2 = prev;
+      prev = cur;
+      if (!(frame % 5)) setInspectText(`扫描中… ${frame - from + 1}/${end - from + 1}`);
+    }
+  } finally {
+    scanning = false;
+    $('scan-btn').classList.remove('on');
+  }
+  scanSamples = samples;
+  const verdict = INSPECT.scanVerdict(samples);
+  scanVerdictText = verdict.text;
+  renderScan(verdict);
+}
+
+function renderScan(verdict) {
+  const canvas = $('scan-chart');
+  const ctx = canvas.getContext('2d');
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  if (!scanSamples.length) return;
+  const peak = Math.max(...scanSamples.map(item => item.mean), 0.001);
+  const barWidth = width / scanSamples.length;
+  scanSamples.forEach((item, index) => {
+    const barHeight = Math.max(1, item.mean / peak * (height - 8));
+    ctx.fillStyle = verdict.peak && item.frame === verdict.peak.frame ? '#ff5c5c' : '#4c8dff';
+    ctx.fillRect(index * barWidth, height - barHeight, Math.max(1, barWidth - 1), barHeight);
+  });
+  ctx.strokeStyle = 'rgba(255,255,255,.25)';
+  ctx.beginPath();
+  const baseY = height - Math.max(1, verdict.base / peak * (height - 8));
+  ctx.moveTo(0, baseY);
+  ctx.lineTo(width, baseY);
+  ctx.stroke();
+  const label = { jump: '动作跳变', shake: '抖动/闪烁', flicker: '隔帧闪烁', ok: '平稳', unknown: '样本不足' }[verdict.kind];
+  setInspectText(`扫描 ${scanSamples.length + 1} 帧：<b class="${verdict.kind === 'ok' ? '' : 'hit'}">${label}</b>\n${verdict.text}\n柱子=相邻帧变化量，横线=区间常态，点柱子可跳过去`);
+  $('scan-flag-btn').hidden = !verdict.peak || verdict.kind === 'ok';
+  $('scan-flag-btn').dataset.frame = verdict.peak ? String(verdict.peak.frame) : '';
+}
+
+$('scan-chart').onclick = e => {
+  if (!scanSamples.length) return;
+  const rect = $('scan-chart').getBoundingClientRect();
+  const index = Math.floor((e.clientX - rect.left) / rect.width * scanSamples.length);
+  const sample = scanSamples[Math.max(0, Math.min(scanSamples.length - 1, index))];
+  if (sample) jumpToFrame(sample.frame);
+};
+
+$('scan-flag-btn').onclick = () => {
+  const frame = parseInt($('scan-flag-btn').dataset.frame, 10);
+  if (!Number.isFinite(frame)) return;
+  jumpToFrame(frame);
+  setTimeout(addFlag, 150);
+};
+
+$('inspect-close-btn').onclick = () => {
+  scanSamples = [];
+  $('inspect-panel').hidden = true;
+};
+
+$('scan-btn').onclick = scanRange;
+$('diff-btn').onclick = toggleDiffView;
+$('zoom-btn').onclick = toggleZoom;
+$('roi-btn').onclick = toggleRoi;
+
+function resetInspectTools() {
+  stopDiffView();
+  $('scan-chart').hidden = true;
+  if (zoomOn) toggleZoom();
+  if (roiOn) toggleRoi();
+  scanSamples = [];
+  roiRect = null;
+  renderRoiBox();
+  $('inspect-panel').hidden = true;
+}
 
 // ---------- 跳帧 / 区间循环 ----------
 function jumpToFrame(frame) {
