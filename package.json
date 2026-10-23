@@ -9,6 +9,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test",
+    "cli": "node cli.js",
     "vendor:prepare": "node scripts/prepare-vendor.mjs",
     "vendor:prepare:win": "node scripts/prepare-vendor-win.mjs",
     "ffmpeg:build": "bash scripts/build-ffmpeg.sh",
@@ -22,5 +23,8 @@
   "devDependencies": {
     "electron": "43.1.0",
     "electron-builder": "26.15.3"
+  },
+  "bin": {
+    "video-checker-cli": "cli.js"
   }
 }

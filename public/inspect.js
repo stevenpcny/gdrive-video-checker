@@ -313,8 +313,17 @@
         text: `${shaky.length + 1} 帧帧间变化偏高（峰值在第 ${peak.frame + 1} 帧），更像是持续抖动/闪烁`
       };
     }
+    // 1.8 倍这一档不再当成毛病：实测干净素材(人物正常走动)的峰值就能到 1.8 倍，
+    // 而真实的缺帧硬接是 3.4 倍以上。报出来会变成狼来了，所以只在文案里带一句。
     if (peak.ratio >= 1.8) {
-      return { kind: 'jump', base, peak, shaky, flickerRatio, text: `第 ${peak.frame + 1} 帧略有跳变（${peak.ratio.toFixed(1)} 倍）` };
+      return {
+        kind: 'ok',
+        base,
+        peak,
+        shaky,
+        flickerRatio,
+        text: `区间内没有明显跳变或闪烁（最大的一次在第 ${peak.frame + 1} 帧，${peak.ratio.toFixed(1)} 倍，仍属正常运动范围）`
+      };
     }
     return { kind: 'ok', base, peak, shaky, flickerRatio, text: '区间内帧间变化平稳，没有明显跳变或闪烁' };
   }
