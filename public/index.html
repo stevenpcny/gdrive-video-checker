@@ -82,7 +82,6 @@
   </div>
   <div id="stats"></div>
   <div id="cfg">
-    <div class="cfg-row">不合格移入子文件夹：<input id="subdir" value="不合格"></div>
     <div class="cfg-row ram-row">
       <label>RAM 缓存 <input id="ram-cache-gb" type="number" min="1" step="0.5" placeholder="自动"> GB</label>
       <label>单视频 <input id="ram-video-gb" type="number" min="0.1" step="0.1" placeholder="自动"> GB</label>
@@ -108,7 +107,7 @@
     <div id="placeholder">
       在左侧选择包含视频的文件夹<br><br>
       <kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> 短按跳5秒·长按连续扫描　<kbd>Shift+←/→</kbd> 跳30秒　<kbd>,</kbd>/<kbd>.</kbd> 逐帧<br>
-      <kbd>↑</kbd>/<kbd>↓</kbd> 上/下一个视频　<kbd>M</kbd> 静音　<kbd>G</kbd> 合格并下一个　<kbd>B</kbd> 不合格并下一个<br>
+      <kbd>↑</kbd>/<kbd>↓</kbd> 上/下一个视频　<kbd>M</kbd> 静音<br>
       <kbd>Enter</kbd> 下一个　<kbd>P</kbd> 上一个　<kbd>[</kbd>/<kbd>]</kbd> 放慢/加快　拖动进度条可逐帧看画面<br>
       <kbd>F</kbd> 记一个穿帮点　<kbd>J</kbd> 跳到指定帧　<kbd>I</kbd>/<kbd>O</kbd> 设区间首/尾帧　<kbd>L</kbd> 区间循环（未设区间时取当前帧±10）<br>
       <kbd>S</kbd> 扫描区间找跳变/闪烁　<kbd>D</kbd> 差分视图　<kbd>Z</kbd> 放大镜（滚轮调倍数）　<kbd>R</kbd> 框选补丁区比清晰度和色差<br>
@@ -125,12 +124,7 @@
     <canvas id="zoom-canvas" hidden></canvas>
     <button id="prev-btn" class="ov-nav" title="P">‹</button>
     <button id="next-btn" class="ov-nav" title="Enter">›</button>
-    <div id="ov-marks">
-      <button class="ok" id="ok-btn" title="G">✓ 合格</button>
-      <button class="bad" id="bad-btn" title="B">✗ 不合格</button>
-    </div>
-    <button id="folder-done-btn">✓ 这组检查完了，进入下一个文件夹 ▸</button>
-    <div id="toast"><span id="toast-msg"></span><button id="undo-btn">撤销</button></div>
+    <div id="toast"><span id="toast-msg"></span></div>
   </div>
   <div id="seek-area">
     <div id="seekbar">

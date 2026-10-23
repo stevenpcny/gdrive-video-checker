@@ -20,7 +20,6 @@ let dirs = [];
 let videos = [];
 let curIdx = -1;
 let marks = {};
-let lastMove = null;
 let fitWindowSeq = 0;
 let publicMode = false;
 let currentPublicLink = null;
@@ -40,7 +39,7 @@ const isLocalRemote = name => typeof name === 'string' && name.startsWith('local
 const isVideo = name => VIDEO_EXT.has(name.split('.').pop().toLowerCase());
 const encPath = p => p.split('/').map(encodeURIComponent).join('/');
 const keyOf = v => (curDir ? curDir + '/' : '') + v.Name;
-const pathOf = v => v.movedTo || keyOf(v); // 不合格已移入子文件夹的，用新路径播放
+const pathOf = v => keyOf(v);
 const markKey = v => curRemote + keyOf(v); // 标记按账号隔离
 const streamUrl = (remote, p) => '/stream/' + encodeURIComponent(remote.replace(/:$/, '')) + '/' + encPath(p);
 const fmt = s => { s = Math.max(0, s | 0); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
@@ -161,7 +160,7 @@ function applySort() {
 function availableBatchItems() {
   return [
     ...dirs.map(entry => makeBatchItem(entry, true, curDir)),
-    ...videos.filter(entry => !entry.movedTo).map(entry => makeBatchItem(entry, false, curDir))
+    ...videos.map(entry => makeBatchItem(entry, false, curDir))
   ];
 }
 
@@ -242,29 +241,23 @@ function render() {
   }
   videos.forEach((v, i) => {
     const el = document.createElement('div');
-    el.className = 'entry' + (i === curIdx ? ' active' : '') + (v.movedTo ? ' badrow' : '');
+    el.className = 'entry' + (i === curIdx ? ' active' : '');
     el.dataset.idx = i;
-    const mark = v.movedTo ? { status: 'bad' } : marks[markKey(v)];
     const flagCount = flagsOf(markKey(v)).length;
     el.innerHTML = `<span class="icon">🎬</span><span class="name"></span>` +
       (flagCount ? `<span class="badge bad" title="已记 ${flagCount} 个穿帮点">穿 ${flagCount}</span>` : '') +
-      (mark && mark.status ? `<span class="badge ${mark.status}">${mark.status === 'ok' ? '合格' : '不合格'}</span>` : '') +
       `<span class="cache-dot${cachedSet.has(markKey(v)) ? ' cached' : ''}" title="绿点=已预热，秒开"></span>` +
-      (v.movedTo ? '' : `<span class="actions"><span class="act-rename" title="重命名视频">✎</span><span class="act-del" title="删除视频">🗑</span></span>`);
+      `<span class="actions"><span class="act-rename" title="重命名视频">✎</span><span class="act-del" title="删除视频">🗑</span></span>`;
     el.querySelector('.name').textContent = v.Name;
     el.onclick = () => play(i);
-    if (!v.movedTo) {
-      addSelectionControl(el, makeBatchItem(v, false, curDir));
-      el.querySelector('.act-rename').onclick = e => { e.stopPropagation(); renameEntry(v, false); };
-      el.querySelector('.act-del').onclick = e => { e.stopPropagation(); deleteVideo(v); };
-    }
+    addSelectionControl(el, makeBatchItem(v, false, curDir));
+    el.querySelector('.act-rename').onclick = e => { e.stopPropagation(); renameEntry(v, false); };
+    el.querySelector('.act-del').onclick = e => { e.stopPropagation(); deleteVideo(v); };
     list.appendChild(el);
   });
 
   if (cmpOn) fillCompareSources();
-  const done = videos.filter(v => v.movedTo || marks[markKey(v)]).length;
-  $('stats').textContent = videos.length ? `视频 ${videos.length} 个 · 已检查 ${done} 个` : '此文件夹没有视频';
-  $('folder-done-btn').style.display = videos.length && done === videos.length ? 'block' : 'none';
+  $('stats').textContent = videos.length ? `视频 ${videos.length} 个` : '此文件夹没有视频';
   updateBatchBar();
 }
 
@@ -706,8 +699,8 @@ async function renameEntry(entry, isDir) {
   if (input === null) return;
   const newName = input.trim();
   if (!newName || newName === oldName) return;
-  if (newName.includes('/')) return toast('名字里不能有斜杠', false);
-  if ([...dirs, ...videos].some(e => e !== entry && e.Name === newName)) return toast(`「${newName}」已存在`, false);
+  if (newName.includes('/')) return toast('名字里不能有斜杠');
+  if ([...dirs, ...videos].some(e => e !== entry && e.Name === newName)) return toast(`「${newName}」已存在`);
   const remote = curRemote.replace(/:$/, '');
   const base = curDir ? curDir + '/' : '';
   const from = base + oldName, to = base + newName;
@@ -717,13 +710,13 @@ async function renameEntry(entry, isDir) {
     // 迁移文件标记(marks 以路径为 key，不迁会失联；文件夹内子项标记无法批量迁，属既有限制)
     if (!isDir && marks[curRemote + from]) {
       const moved = marks[curRemote + from];
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + to, status: moved.status || null, flags: moved.flags || [] }) });
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + from, status: null, flags: [] }) });
+      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + to, flags: moved.flags || [] }) });
+      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + from, flags: [] }) });
     }
     await reloadKeepingCurrent(wasCurrent ? newName : undefined);
-    toast(`已重命名为「${newName}」`, false);
+    toast(`已重命名为「${newName}」`);
   } catch (e) {
-    toast('重命名失败: ' + e.message, false);
+    toast('重命名失败: ' + e.message);
   }
 }
 
@@ -734,12 +727,12 @@ async function deleteVideo(v) {
   const wasCurrent = curIdx >= 0 && videos[curIdx] === v;
   try {
     await api('/api/delete', { method: 'POST', body: JSON.stringify({ remote, path: p }) });
-    if (marks[curRemote + p]) await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + p, status: null }) });
+    if (marks[curRemote + p]) await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + p, flags: [] }) });
     if (wasCurrent) stopPlayback();
     await reloadKeepingCurrent(wasCurrent ? null : undefined);
-    toast(`已删除「${v.Name}」（Drive 回收站可恢复）`, false);
+    toast(`已删除「${v.Name}」（Drive 回收站可恢复）`);
   } catch (e) {
-    toast('删除失败: ' + e.message, false);
+    toast('删除失败: ' + e.message);
   }
 }
 
@@ -750,9 +743,9 @@ async function deleteFolder(d) {
   try {
     await api('/api/delete', { method: 'POST', body: JSON.stringify({ remote, path: p, isDir: true }) });
     await reloadKeepingCurrent();
-    toast(`已删除文件夹「${d.Name}」（Drive 回收站可恢复）`, false);
+    toast(`已删除文件夹「${d.Name}」（Drive 回收站可恢复）`);
   } catch (e) {
-    toast('删除失败: ' + e.message, false);
+    toast('删除失败: ' + e.message);
   }
 }
 
@@ -874,8 +867,8 @@ $('move-folder-confirm-btn').onclick = async () => {
         const toMark = `${remote}:${to}`;
         if (marks[fromMark]) {
           try {
-            await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: toMark, status: marks[fromMark].status }) });
-            await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: fromMark, status: null }) });
+            await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: toMark, flags: marks[fromMark].flags || [] }) });
+            await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: fromMark, flags: [] }) });
           } catch (error) {
             warnings.push(`${item.name}的检查标记未同步（${error.message}）`);
           }
@@ -891,7 +884,7 @@ $('move-folder-confirm-btn').onclick = async () => {
   if (!failures.length) {
     closeMoveFolder();
     const warningText = warnings.length ? `；${warnings.join('；')}` : '';
-    toast(`已将 ${success} 项移动到「${moveFolderDir || '根目录'}」${warningText}`, false);
+    toast(`已将 ${success} 项移动到「${moveFolderDir || '根目录'}」${warningText}`);
   } else {
     movingItems = failures;
     for (const item of failures) selectedKeys.add(item.key);
@@ -932,7 +925,7 @@ $('batch-delete-btn').onclick = async () => {
       success++;
       if (!item.isDir && marks[`${remote}:${item.path}`]) {
         try {
-          await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: `${remote}:${item.path}`, status: null }) });
+          await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: `${remote}:${item.path}`, flags: [] }) });
         } catch (error) {
           warnings.push(`${item.name}的检查标记未清理（${error.message}）`);
         }
@@ -949,7 +942,7 @@ $('batch-delete-btn').onclick = async () => {
   render();
   const failureText = failures.length ? `，${failures.length} 项失败：${failures.map(item => `${item.name}（${item.error}）`).join('；')}` : '';
   const warningText = warnings.length ? `；${warnings.join('；')}` : '';
-  toast(`已删除 ${success} 项${failureText}${warningText}（Drive 回收站可恢复）`, false);
+  toast(`已删除 ${success} 项${failureText}${warningText}（Drive 回收站可恢复）`);
 };
 
 let sharingFolder = null;
@@ -1056,7 +1049,7 @@ async function loadSharePermissions() {
 }
 
 function openShareFolder(entry) {
-  if (!entry.ID) return toast('这个文件夹没有可用的 Google Drive ID', false);
+  if (!entry.ID) return toast('这个文件夹没有可用的 Google Drive ID');
   sharingFolder = { id: entry.ID, name: entry.Name, remote: curRemote.replace(/:$/, '') };
   $('share-folder-modal').hidden = false;
   $('share-folder-loading').textContent = '正在读取 Google Drive 权限…';
@@ -1075,7 +1068,7 @@ async function applyShareAction(payload) {
     });
     sharingData = data.file ? data : await api('/api/folder-permissions?remote=' + encodeURIComponent(sharingFolder.remote) + '&fileId=' + encodeURIComponent(sharingFolder.id));
     renderSharePermissions();
-    toast('共享权限已更新', false);
+    toast('共享权限已更新');
   } catch (e) {
     $('share-folder-status').className = 'error';
     $('share-folder-status').textContent = '更新失败: ' + e.message;
@@ -1100,7 +1093,7 @@ $('share-link-apply-btn').onclick = async () => {
 };
 $('share-user-add-btn').onclick = async () => {
   const email = $('share-email').value.trim();
-  if (!email) return toast('请输入邮箱地址', false);
+  if (!email) return toast('请输入邮箱地址');
   await applyShareAction({ action: 'add-user', email, role: $('share-user-role').value });
   $('share-email').value = '';
 };
@@ -1112,15 +1105,15 @@ async function uploadFiles(files) {
   let done = 0, fail = 0;
   for (let n = 0; n < files.length; n++) {
     const f = files[n];
-    if (existing.has(f.name)) { toast(`「${f.name}」已存在，跳过`, false); fail++; continue; }
+    if (existing.has(f.name)) { toast(`「${f.name}」已存在，跳过`); fail++; continue; }
     const id = Math.random().toString(36).slice(2);
     const label = `上传中 ${n + 1}/${files.length}：${f.name}`;
-    toast(label + ' …', false);
+    toast(label + ' …');
     // 轮询服务端 copyto 进度(浏览器→本地服务器几乎瞬时，耗时在服务器→Drive)
     const poll = setInterval(async () => {
       try {
         const r = await api('/api/upload/progress?id=' + id);
-        toast(`${label} ${r.pct}%`, false);
+        toast(`${label} ${r.pct}%`);
       } catch { /* 忽略单次轮询失败 */ }
     }, 400);
     try {
@@ -1128,105 +1121,41 @@ async function uploadFiles(files) {
       if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || r.status); }
       existing.add(f.name);
       done++;
-    } catch (e) { fail++; toast(`上传「${f.name}」失败: ${e.message}`, false); }
+    } catch (e) { fail++; toast(`上传「${f.name}」失败: ${e.message}`); }
     finally { clearInterval(poll); }
   }
   await reloadKeepingCurrent();
-  if (done) toast(`已上传 ${done} 个视频${fail ? `，${fail} 个跳过/失败` : ''}`, false);
+  if (done) toast(`已上传 ${done} 个视频${fail ? `，${fail} 个跳过/失败` : ''}`);
 }
 
 $('upload-btn').onclick = () => $('upload-file').click();
 $('upload-file').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) uploadFiles(fs); };
 
-// ---------- 标记 / 移动 ----------
-function next() { if (curIdx + 1 < videos.length) play(curIdx + 1); else toast('已经是最后一个了', false); }
+// ---------- 切换 ----------
+function next() { if (curIdx + 1 < videos.length) play(curIdx + 1); else toast('已经是最后一个了'); }
 function prev() { if (curIdx > 0) play(curIdx - 1); }
-
-async function markOk() {
-  if (curIdx < 0) return;
-  const key = markKey(videos[curIdx]);
-  await api('/api/marks', { method: 'POST', body: JSON.stringify({ key, status: 'ok' }) });
-  marks[key] = { status: 'ok' };
-  next();
-}
-
-let moveInFlight = Promise.resolve(); // 后台移动队列，undo 需等它
-
-function markBad() {
-  if (curIdx < 0) return;
-  const v = videos[curIdx];
-  const sub = $('subdir').value.trim() || '不合格';
-  const from = keyOf(v);
-  const to = (curDir ? curDir + '/' : '') + sub + '/' + v.Name;
-  const remote = curRemote.replace(/:$/, '');
-  const markRemote = curRemote;
-  const cur = curIdx;
-  if (v.movedTo) return; // 已经标过
-
-  // 立即标红并切下一个，移动在后台执行，不打断节奏
-  v.movedTo = to;
-  curIdx = -1;
-  if (cur + 1 < videos.length) play(cur + 1); else { stopPlayback(); render(); }
-  toast(`已移入「${sub}」: ${v.Name}`, true);
-
-  moveInFlight = moveInFlight.then(async () => {
-    try {
-      await api('/api/move', { method: 'POST', body: JSON.stringify({ remote, from, to }) });
-      const moved = flagsOf(markRemote + from);
-      await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: markRemote + to, status: 'bad', flags: moved }) });
-      marks[markRemote + to] = { status: 'bad', ...(moved.length ? { flags: moved } : {}) };
-      if (moved.length) {
-        await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: markRemote + from, flags: [] }) });
-        if (marks[markRemote + from]) delete marks[markRemote + from].flags;
-      }
-      lastMove = { from, to, name: v.Name };
-    } catch (e) {
-      v.movedTo = null; // 失败: 撤掉红标并提示
-      render();
-      toast(`移动失败，已恢复标记: ${e.message}`, false);
-    }
-  });
-}
-
-async function undo() {
-  await moveInFlight; // 等后台移动落定，lastMove 才是最新状态
-  if (!lastMove) return;
-  const { from, to, name } = lastMove;
-  lastMove = null;
-  hideToast();
-  try {
-    await api('/api/move', { method: 'POST', body: JSON.stringify({ remote: curRemote.replace(/:$/, ''), from: to, to: from }) });
-    await api('/api/marks', { method: 'POST', body: JSON.stringify({ key: curRemote + to, status: null }) });
-    await loadDir(curDir);
-    const i = videos.findIndex(v => v.Name === name);
-    if (i >= 0) play(i);
-  } catch (e) {
-    toast('撤销失败: ' + e.message, false);
-  }
-}
 
 // 跳到父文件夹里的上/下一个同级文件夹(按当前排序)，自动播放第一个视频
 async function gotoFolder(delta) {
-  if (!curDir) return toast('已在根目录，没有上一级', false);
+  if (!curDir) return toast('已在根目录，没有上一级');
   const cut = curDir.lastIndexOf('/');
   const parent = cut < 0 ? '' : curDir.slice(0, cut);
   const name = cut < 0 ? curDir : curDir.slice(cut + 1);
   $('next-folder-btn').disabled = $('prev-folder-btn').disabled = true;
   try {
     const r = await api('/api/list?remote=' + encodeURIComponent(curRemote.replace(/:$/, '')) + '&path=' + encodeURIComponent(parent));
-    const sub = $('subdir').value.trim() || '不合格';
-    const folders = r.entries.filter(e => e.IsDir && e.Name !== sub).sort(sortCmp());
+    const folders = r.entries.filter(e => e.IsDir).sort(sortCmp());
     const i = folders.findIndex(f => f.Name === name);
     const j = i + delta;
     if (i < 0 || j < 0 || j >= folders.length) {
-      return toast(delta > 0 ? '已经是上一级里的最后一个文件夹了' : '已经是上一级里的第一个文件夹了', false);
+      return toast(delta > 0 ? '已经是上一级里的最后一个文件夹了' : '已经是上一级里的第一个文件夹了');
     }
     const target = (parent ? parent + '/' : '') + folders[j].Name;
     stopPlayback();
     await loadDir(target);
-    if (videos.length) play(0); else toast(`「${folders[j].Name}」里没有视频`, false);
+    if (videos.length) play(0); else toast(`「${folders[j].Name}」里没有视频`);
   } catch (e) {
-    toast('切换失败: ' + e.message, false);
+    toast('切换失败: ' + e.message);
   } finally {
     $('next-folder-btn').disabled = $('prev-folder-btn').disabled = false;
   }
@@ -1235,33 +1164,21 @@ $('prev-folder-btn').onclick = () => gotoFolder(-1);
 $('next-folder-btn').onclick = () => gotoFolder(1);
 
 // 按视频编号从小到大，复制检查结果，一行一个，可粘贴到表格一列。
-// 穿帮 = 已被移入「不合格」子文件夹的视频；其余（源文件夹现存）= 已完成。
+// 穿帮 = 记过穿帮点(F)的视频；其余 = 已完成。
 async function copyResult() {
-  const remote = curRemote.replace(/:$/, '');
-  const sub = $('subdir').value.trim() || '不合格';
   const numOf = name => { const n = parseInt(name, 10); return Number.isNaN(n) ? Infinity : n; };
-  // 源文件夹现存视频 → 已完成；排除本会话刚移走(movedTo)的，避免与子文件夹重复
-  const rows = videos.filter(v => !v.movedTo).map(v => ({ name: v.Name, status: '✅ 已完成' }));
-  // 「不合格」子文件夹里的视频 → 穿帮
-  let badCount = 0;
-  try {
-    const badPath = (curDir ? curDir + '/' : '') + sub;
-    const listing = await api('/api/list?remote=' + encodeURIComponent(remote) + '&path=' + encodeURIComponent(badPath));
-    for (const e of listing.entries) {
-      if (!e.IsDir && isVideo(e.Name)) { rows.push({ name: e.Name, status: '穿帮' }); badCount++; }
-    }
-  } catch { /* 没有「不合格」子文件夹 = 没有穿帮 */ }
-  if (!rows.length) { toast('这个文件夹没有可复制的结果', false); return; }
+  const rows = videos.map(v => ({ name: v.Name, bad: flagsOf(markKey(v)).length > 0 }));
+  if (!rows.length) { toast('这个文件夹没有可复制的结果'); return; }
   rows.sort((a, b) => numOf(a.name) - numOf(b.name) || a.name.localeCompare(b.name, 'zh', { numeric: true }));
-  const text = rows.map(r => r.status).join('\n');
+  const badCount = rows.filter(r => r.bad).length;
+  const text = rows.map(r => r.bad ? '穿帮' : '✅ 已完成').join('\n');
   if (await writeClipboard(text)) {
-    toast(`已复制 ${rows.length} 条结果（穿帮 ${badCount}），按编号从小到大`, false);
+    toast(`已复制 ${rows.length} 条结果（穿帮 ${badCount}），按编号从小到大`);
   } else {
-    toast('复制失败，请检查浏览器剪贴板权限', false);
+    toast('复制失败，请检查浏览器剪贴板权限');
   }
 }
 
-// 优先用 clipboard API，失败时回退到 execCommand（对焦点/手势要求更宽松）
 async function writeClipboard(text) {
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -1282,12 +1199,10 @@ async function writeClipboard(text) {
   return ok;
 }
 $('copy-result-btn').onclick = copyResult;
-$('folder-done-btn').onclick = () => gotoFolder(1);
 
 let toastTimer;
-function toast(msg, undoable) {
+function toast(msg) {
   $('toast-msg').textContent = msg;
-  $('undo-btn').style.display = undoable ? '' : 'none';
   $('toast').style.display = 'flex';
   clearTimeout(toastTimer);
   toastTimer = setTimeout(hideToast, 6000);
@@ -1420,7 +1335,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'c' || k === 'C') { e.preventDefault(); toggleCompare(); }
   else if (k === 'x' || k === 'X') { e.preventDefault(); flipCompare(); }
   else if (k === 'v' || k === 'V') { e.preventDefault(); cycleCompareMode(); }
-  else if (k === 'Escape') { if (looping || loopIn !== null) { clearLoop(); toast('已清除区间', false); } }
+  else if (k === 'Escape') { if (looping || loopIn !== null) { clearLoop(); toast('已清除区间'); } }
   else if (k === 'ArrowUp') {
     e.preventDefault();
     if (!e.repeat) prev();
@@ -1430,8 +1345,6 @@ document.addEventListener('keydown', e => {
     if (!e.repeat) next();
   }
   else if (k === 'm' || k === 'M') { video.muted = !video.muted; $('mute-btn').textContent = video.muted ? '🔇' : '🔊'; }
-  else if (k === 'g' || k === 'G') markOk();
-  else if (k === 'b' || k === 'B') markBad();
   else if (k === 'Enter') next();
   else if (k === 'p' || k === 'P') prev();
 });
@@ -1445,11 +1358,8 @@ window.addEventListener('blur', () => finishArrowHold(false));
 
 $('play-btn').onclick = () => video.paused ? video.play() : video.pause();
 $('mute-btn').onclick = () => { video.muted = !video.muted; $('mute-btn').textContent = video.muted ? '🔇' : '🔊'; };
-$('ok-btn').onclick = markOk;
-$('bad-btn').onclick = markBad;
 $('next-btn').onclick = next;
 $('prev-btn').onclick = prev;
-$('undo-btn').onclick = undo;
 video.addEventListener('ended', next);
 
 // ---------- 账号切换 / 导入 ----------
@@ -1565,15 +1475,14 @@ const curFlagKey = () => (curIdx >= 0 && videos[curIdx] ? markKey(videos[curIdx]
 
 async function saveFlags(key, list) {
   const sorted = [...list].sort((a, b) => a.frame - b.frame);
-  const entry = marks[key] || {};
-  if (sorted.length) marks[key] = { ...entry, flags: sorted };
-  else { delete entry.flags; marks[key] = entry; if (!entry.status) delete marks[key]; }
+  if (sorted.length) marks[key] = { ...(marks[key] || {}), flags: sorted };
+  else delete marks[key];
   renderFlags();
   render();
   try {
     await api('/api/marks', { method: 'POST', body: JSON.stringify({ key, flags: sorted }) });
   } catch (error) {
-    toast('穿帮点没能保存: ' + error.message, false);
+    toast('穿帮点没能保存: ' + error.message);
   }
 }
 
@@ -1583,11 +1492,11 @@ function addFlag() {
   const frame = targetFrame();
   const list = flagsOf(key);
   if (list.some(item => item.frame === frame)) {
-    toast(`第 ${frame + 1} 帧已经标过了`, false);
+    toast(`第 ${frame + 1} 帧已经标过了`);
     return;
   }
   saveFlags(key, [...list, { frame, t: Number(((frame + 0.5) * frameDur).toFixed(3)) }]);
-  toast(`已记穿帮点：第 ${frame + 1} 帧 · ${fmtAt(video.currentTime)}`, false);
+  toast(`已记穿帮点：第 ${frame + 1} 帧 · ${fmtAt(video.currentTime)}`);
 }
 
 function removeFlag(frame) {
@@ -1637,9 +1546,9 @@ $('flag-copy-btn').onclick = async () => {
       rows.push(`${v.Name}\t帧 ${item.frame + 1}\t${fmtAt(item.t)}`);
     }
   }
-  if (!rows.length) return toast('这个文件夹还没有穿帮点', false);
-  if (await writeClipboard(rows.join('\n'))) toast(`已复制 ${rows.length} 个穿帮点（文件名/帧号/时间）`, false);
-  else toast('复制失败，请检查剪贴板权限', false);
+  if (!rows.length) return toast('这个文件夹还没有穿帮点');
+  if (await writeClipboard(rows.join('\n'))) toast(`已复制 ${rows.length} 个穿帮点（文件名/帧号/时间）`);
+  else toast('复制失败，请检查剪贴板权限');
 };
 
 // ---------- 查穿帮：差分 / 放大镜 / 框选 / 区间扫描 ----------
@@ -1733,7 +1642,7 @@ function toggleDiffView() {
     setInspectText('');
     return;
   }
-  if (!frameReady()) return toast('这个视频本机解不了码，差分视图用不了', false);
+  if (!frameReady()) return toast('这个视频本机解不了码，差分视图用不了');
   diffOn = true;
   prevGrab = null;
   fxCanvas.hidden = false;
@@ -1772,7 +1681,7 @@ function toggleZoom() {
     zoomOn = false;
     zoomCanvas.hidden = true;
     $('zoom-btn').classList.remove('on');
-    return toast('这个视频本机解不了码，放大镜用不了', false);
+    return toast('这个视频本机解不了码，放大镜用不了');
   }
   zoomCanvas.width = 260;
   zoomCanvas.height = 260;
@@ -1919,13 +1828,13 @@ function seekB(time) {
 
 async function scanRange() {
   if (scanning) return;
-  if (!frameReady()) return toast('这个视频本机解不了码，扫描用不了', false);
+  if (!frameReady()) return toast('这个视频本机解不了码，扫描用不了');
   const base = targetFrame();
   const from = loopIn !== null ? loopIn : Math.max(0, base - 10);
   const to = loopOut !== null ? loopOut : from + 20;
   const last = Math.max(0, Math.round(video.duration / frameDur) - 1);
   const end = Math.min(last, to);
-  if (end - from < 2) return toast('区间太短，先用 I/O 设一个区间', false);
+  if (end - from < 2) return toast('区间太短，先用 I/O 设一个区间');
   scanning = true;
   video.pause();
   stopDiffView();
@@ -2061,7 +1970,7 @@ function fillCompareSources() {
 }
 
 async function openCompare() {
-  if (curIdx < 0) return toast('先选一个要检查的视频', false);
+  if (curIdx < 0) return toast('先选一个要检查的视频');
   cmpOn = true;
   $('cmp-panel').hidden = false;
   cmpCanvas.hidden = false;
@@ -2212,7 +2121,7 @@ function startCompareLoop() {
 
 // 自动对齐：在候选偏移里找整体差异最小的那个
 async function autoAlign() {
-  if (!videoB.videoWidth) return toast('先选一条对照片', false);
+  if (!videoB.videoWidth) return toast('先选一条对照片');
   const wasPaused = video.paused;
   video.pause();
   videoB.pause();
@@ -2333,7 +2242,7 @@ async function askJumpFrame() {
   const typed = await askText('跳到第几帧', String(targetFrame() + 1), `这个视频共 ${total} 帧（从 1 开始）`);
   if (typed === null) return;
   const frame = parseInt(typed.trim(), 10);
-  if (!Number.isFinite(frame)) return toast('请输入帧号数字', false);
+  if (!Number.isFinite(frame)) return toast('请输入帧号数字');
   jumpToFrame(frame - 1);
 }
 
@@ -2363,7 +2272,7 @@ function setLoopEdge(which) {
   else loopOut = frame;
   if (loopIn !== null && loopOut !== null && loopOut < loopIn) [loopIn, loopOut] = [loopOut, loopIn];
   renderLoop();
-  toast(which === 'in' ? `区间首帧 = 第 ${frame + 1} 帧` : `区间尾帧 = 第 ${frame + 1} 帧`, false);
+  toast(which === 'in' ? `区间首帧 = 第 ${frame + 1} 帧` : `区间尾帧 = 第 ${frame + 1} 帧`);
 }
 
 function toggleLoop() {
@@ -2371,7 +2280,7 @@ function toggleLoop() {
   if (looping) {
     looping = false;
     renderLoop();
-    toast('已停止区间循环', false);
+    toast('已停止区间循环');
     return;
   }
   // 没设区间时，默认围绕当前帧取 ±10 帧——补丁接点就是这么看的
@@ -2384,7 +2293,7 @@ function toggleLoop() {
   renderLoop();
   jumpToFrame(loopIn);
   video.play().catch(() => {});
-  toast(`循环第 ${loopIn + 1}–${loopOut + 1} 帧，按 L 停止`, false);
+  toast(`循环第 ${loopIn + 1}–${loopOut + 1} 帧，按 L 停止`);
 }
 
 function clearLoop() {
@@ -2401,7 +2310,7 @@ async function openLocalPaths(paths) {
     const result = await api('/api/local/open', { method: 'POST', body: JSON.stringify({ paths: list }) });
     await enterLocalMode(result);
   } catch (error) {
-    toast('打开本地视频失败: ' + error.message, false);
+    toast('打开本地视频失败: ' + error.message);
   }
 }
 
@@ -2425,7 +2334,7 @@ async function enterLocalMode(result) {
   await loadDir('');
   $('stats').textContent = '本地文件夹：' + result.dir;
   if (!videos.length) {
-    toast('这个文件夹里没有可识别的视频文件', false);
+    toast('这个文件夹里没有可识别的视频文件');
     return;
   }
   const picked = (result.startNames || [])
@@ -2474,7 +2383,7 @@ document.addEventListener('drop', e => {
   const files = [...e.dataTransfer.files];
   if (!files.length) return;
   if (!DESKTOP || !DESKTOP.getPathForFile) {
-    toast('浏览器模式下拿不到文件路径，请在「视频检查器」应用里拖拽，或用「📂 本地」输入文件夹路径', false);
+    toast('浏览器模式下拿不到文件路径，请在「视频检查器」应用里拖拽，或用「📂 本地」输入文件夹路径');
     return;
   }
   openLocalPaths(files.map(file => DESKTOP.getPathForFile(file)));
@@ -2531,7 +2440,7 @@ function openPublicVideo(link) {
   $('cur-name').textContent = '公开 Drive 视频·只读模式';
   $('link-paste-input').value = '';
   showAccountModal(false);
-  toast('已用本地播放器打开公开视频，支持快进和倍速', false);
+  toast('已用本地播放器打开公开视频，支持快进和倍速');
 }
 
 function openPublicPreviewFallback() {
@@ -2572,7 +2481,7 @@ video.addEventListener('error', () => {
   decodeFailed = true;
   renderMediaInfo();
   const codec = mediaInfo && mediaInfo.codec ? mediaInfo.codec + (mediaInfo.bitDepth ? ` ${mediaInfo.bitDepth}bit` : '') : '这个编码';
-  toast(`播放器无法解码 ${codec}；信息栏和逐帧预览仍可用`, false);
+  toast(`播放器无法解码 ${codec}；信息栏和逐帧预览仍可用`);
 });
 
 video.addEventListener('error', async () => {
@@ -2580,7 +2489,7 @@ video.addEventListener('error', async () => {
   $('public-fallback-btn').hidden = false;
   const reason = await diagnosePublicPlayback();
   if (!publicMode || document.body.classList.contains('public-preview-mode')) return;
-  toast('直连播放失败：' + reason + '；也可点「改用 Google 预览」', false);
+  toast('直连播放失败：' + reason + '；也可点「改用 Google 预览」');
 });
 
 $('remote-sel').onchange = async e => {
@@ -2606,7 +2515,6 @@ $('sort-sel').onchange = async e => {
   if (curIdx >= 0) prefetchAround(curIdx);
 };
 
-$('subdir').onchange = () => saveSettings({ subdir: $('subdir').value.trim() || '不合格' });
 $('ram-cache-gb').onchange = saveRamSettings;
 $('ram-video-gb').onchange = saveRamSettings;
 $('hold-seek-rate').onchange = () => saveSettings({ holdSeekRate: Number($('hold-seek-rate').value) });
@@ -2614,22 +2522,22 @@ let ramSaveTimer;
 for (const id of ['ram-cache-gb', 'ram-video-gb']) {
   $(id).oninput = () => {
     clearTimeout(ramSaveTimer);
-    ramSaveTimer = setTimeout(() => saveRamSettings().catch(e => toast('保存 RAM 设置失败: ' + e.message, false)), 400);
+    ramSaveTimer = setTimeout(() => saveRamSettings().catch(e => toast('保存 RAM 设置失败: ' + e.message)), 400);
   };
 }
 
 $('link-btn').onclick = async () => {
-  if (!curRemote) return toast('请先添加 Google Drive 账号', false);
+  if (!curRemote) return toast('请先添加 Google Drive 账号');
   let link;
   try {
     const r = await api('/api/link?remote=' + encodeURIComponent(curRemote.replace(/:$/, '')) + '&path=' + encodeURIComponent(curDir));
     link = r.url;
   } catch (e) {
-    return toast('取链接失败: ' + e.message, false);
+    return toast('取链接失败: ' + e.message);
   }
   try {
     await navigator.clipboard.writeText(link);
-    toast('已复制链接: ' + link, false);
+    toast('已复制链接: ' + link);
   } catch {
     prompt('自动复制失败，请手动复制：', link);
   }
@@ -2637,9 +2545,9 @@ $('link-btn').onclick = async () => {
 
 $('link-paste-btn').onclick = () => {
   const link = DriveLink.parse($('link-paste-input').value);
-  if (!link) return toast('看不出这是有效的 Google Drive 文件夹或视频链接', false);
+  if (!link) return toast('看不出这是有效的 Google Drive 文件夹或视频链接');
   if (link.type === 'file') return openPublicVideo(link);
-  if (!curRemote) return toast('单个公开视频可免登录播放；打开整个文件夹仍需先添加账号', false);
+  if (!curRemote) return toast('单个公开视频可免登录播放；打开整个文件夹仍需先添加账号');
   const folderId = link.id;
   const value = curRemote.replace(/:$/, '').split(',')[0] + ',root_folder_id=' + folderId + ':';
   const sel = $('remote-sel');
@@ -2681,7 +2589,7 @@ function renderOAuthStep(response) {
       $('remote-sel').dispatchEvent(new Event('change'));
     });
     showAccountModal(false);
-    toast('Google OAuth 授权完成: ' + response.remote, false);
+    toast('Google OAuth 授权完成: ' + response.remote);
     return;
   }
   oauthFlow = { sessionId: response.sessionId, state: response.state };
@@ -2738,7 +2646,7 @@ function loadOAuthJson(key, fileName) {
     .slice(0, 32);
   if (suggestedName) $('oauth-name').value = suggestedName;
   $('oauth-json-status').textContent = '✓ 已读取 OAuth JSON，现在请点击“开始配置”';
-  toast('已读取 OAuth JSON，请点击“开始配置”完成 Google 登录', false);
+  toast('已读取 OAuth JSON，请点击“开始配置”完成 Google 登录');
   return true;
 }
 
@@ -2749,7 +2657,7 @@ $('import-file').onchange = async e => {
   const text = await file.text();
   let key;
   try { key = JSON.parse(text); }
-  catch { return toast('导入失败: 不是有效的 JSON 文件', false); }
+  catch { return toast('导入失败: 不是有效的 JSON 文件'); }
   if (loadOAuthJson(key, file.name)) return;
   const fallback = file.name.replace(/\.json$/i, '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 32) || 'gdrive2';
   const name = prompt('给这个账号起个名字（字母数字-_）：', fallback);
@@ -2760,9 +2668,9 @@ $('import-file').onchange = async e => {
     $('remote-sel').value = result.remote;
     $('remote-sel').dispatchEvent(new Event('change'));
     showAccountModal(false);
-    toast(`已导入 ${result.remote} — 请把目标文件夹分享给 ${result.email}`, false);
+    toast(`已导入 ${result.remote} — 请把目标文件夹分享给 ${result.email}`);
   } catch (error) {
-    toast('导入失败: ' + error.message, false);
+    toast('导入失败: ' + error.message);
   }
 };
 
@@ -2777,9 +2685,9 @@ $('config-file').onchange = async e => {
     await loadRemotes();
     if (curRemote) loadDir('');
     showAccountModal(false);
-    toast(`已导入 ${result.remotes.length} 个 rclone 账号`, false);
+    toast(`已导入 ${result.remotes.length} 个 rclone 账号`);
   } catch (error) {
-    toast(error.message, false);
+    toast(error.message);
   }
 };
 
@@ -2797,7 +2705,7 @@ $('oauth-start-btn').onclick = async () => {
     });
     renderOAuthStep(response);
   } catch (error) {
-    toast(error.message, false);
+    toast(error.message);
   } finally {
     button.disabled = false;
   }
@@ -2818,7 +2726,7 @@ $('oauth-continue-btn').onclick = async () => {
     });
     renderOAuthStep(response);
   } catch (error) {
-    toast(error.message, false);
+    toast(error.message);
   } finally {
     button.disabled = false;
   }
@@ -2838,7 +2746,6 @@ async function initialize() {
     curRemote = settings.remote || '';
     sortMode = settings.sortMode || 'name';
     $('sort-sel').value = sortMode;
-    $('subdir').value = settings.subdir || '不合格';
     $('ram-cache-gb').value = settings.ramCacheGb > 0 ? settings.ramCacheGb : '';
     $('ram-video-gb').value = settings.ramMaxVideoGb > 0 ? settings.ramMaxVideoGb : '';
     $('hold-seek-rate').value = String([0.5, 1, 2, 4, 8, 16].includes(Number(settings.holdSeekRate)) ? Number(settings.holdSeekRate) : 4);
@@ -2846,7 +2753,7 @@ async function initialize() {
     await refreshRamStatus();
     if (await loadRemotes()) await loadDir('');
   } catch (error) {
-    toast('启动失败: ' + error.message, false);
+    toast('启动失败: ' + error.message);
     showAccountModal(true);
   }
 }
