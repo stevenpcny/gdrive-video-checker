@@ -1570,7 +1570,6 @@ let prevGrab = null;
 let diffHandle = 0;
 let scanning = false;
 let scanSamples = [];
-let scanVerdictText = '';
 
 const frameReady = () => video.readyState >= 2 && video.videoWidth > 0;
 
@@ -1740,11 +1739,14 @@ function analyzeRoi() {
   if (!frame) return setInspectText('取不到画面像素，可能是本机解不了这个编码');
   const result = INSPECT.analyzeSelection(frame, roiRect);
   const upscaled = result.effective.confident && result.effective.scale > 1;
+  // 色差比的是边内外均值(偏色)，台阶比的是跨边梯度(硬边/切断)，两个分工不同
+  const step = INSPECT.seamStepVerdict(INSPECT.edgeStepProfile(frame, roiRect));
   setInspectText([
     `选区 <b>${result.width}×${result.height}</b> 像素`,
     `清晰度：区内 ${result.innerSharp.toFixed(1)} / 周围 ${result.ringSharp.toFixed(1)} → <b>${result.sharpVerdict}</b>`,
     `实际细节：<b class="${upscaled ? 'hit' : ''}">${result.effectiveVerdict}</b>`,
-    `色差：<b class="${result.seamMaxDelta >= 8 ? 'hit' : ''}">${result.seamVerdict}</b>`
+    `色差：<b class="${result.seamMaxDelta >= 8 ? 'hit' : ''}">${result.seamVerdict}</b>`,
+    `接缝：<b class="${step.kind === 'ok' || step.kind === 'unknown' ? '' : 'hit'}">${step.text}</b>`
   ].join('\n'));
 }
 
@@ -1839,22 +1841,30 @@ async function scanRange() {
   video.pause();
   stopDiffView();
   $('scan-btn').classList.add('on');
-  setInspectText(`扫描第 ${from + 1}–${end + 1} 帧…`);
+  // 框选过就只扫补丁区：补丁占画幅 ≤2% 时，全画幅的帧间均值会把它的闪烁
+  // 稀释到判不出来（实测同一个闪烁补丁 17% 时 2.7 倍、1.9% 时 0.84 倍）。
+  // 同时取一块同尺寸的区外对照区，用来回答「是补丁自己的问题还是整幅都这样」。
+  const scanRect = roiRect && roiRect.w > 8 && roiRect.h > 8 ? roiRect : null;
+  const scanCtrl = scanRect ? INSPECT.controlRect(scanRect, video.videoWidth, video.videoHeight) : null;
+  // 全画幅那条路径保持原来的 360，不动既有标定；补丁区要原始像素才量得准
+  const grabWidth = scanRect ? video.videoWidth : 360;
+  setInspectText(scanRect
+    ? `在框选区内扫描第 ${from + 1}–${end + 1} 帧…`
+    : `扫描第 ${from + 1}–${end + 1} 帧…`);
   const samples = [];
-  let prev = null;
-  let prev2 = null;
+  const seamSeries = [];
+  const sampler = INSPECT.createScanSampler({ rect: scanRect, control: scanCtrl });
   try {
     for (let frame = from; frame <= end; frame++) {
-      const cur = await seekAndGrab(frame);
+      const cur = await seekAndGrab(frame, grabWidth);
       if (!cur) break;
-      if (prev) {
-        const stats = INSPECT.frameDiffStats(prev, cur);
-        // 同时记隔一帧的差异：隔帧闪烁会让 mean 反而比 mean2 更大
-        if (prev2) stats.mean2 = INSPECT.frameDiffStats(prev2, cur).mean;
-        samples.push({ frame, ...stats });
+      const sample = sampler.push(frame, cur);
+      if (sample) samples.push(sample);
+      if (scanRect) {
+        const profile = INSPECT.edgeStepProfile(cur, scanRect);
+        const edges = Object.values(profile).filter(Boolean);
+        seamSeries.push(edges.length ? Math.max(...edges.map(e => e.runStep)) : 0);
       }
-      prev2 = prev;
-      prev = cur;
       if (!(frame % 5)) setInspectText(`扫描中… ${frame - from + 1}/${end - from + 1}`);
     }
   } finally {
@@ -1862,12 +1872,12 @@ async function scanRange() {
     $('scan-btn').classList.remove('on');
   }
   scanSamples = samples;
-  const verdict = INSPECT.scanVerdict(samples);
-  scanVerdictText = verdict.text;
-  renderScan(verdict);
+  const verdict = INSPECT.scanVerdict(samples, scanRect ? { scope: '补丁区' } : {});
+  const breathing = scanRect ? INSPECT.breathingVerdict(seamSeries) : null;
+  renderScan(verdict, breathing);
 }
 
-function renderScan(verdict) {
+function renderScan(verdict, breathing) {
   const canvas = $('scan-chart');
   const ctx = canvas.getContext('2d');
   const width = canvas.width;
@@ -1888,7 +1898,10 @@ function renderScan(verdict) {
   ctx.lineTo(width, baseY);
   ctx.stroke();
   const label = { jump: '动作跳变', shake: '抖动/闪烁', flicker: '隔帧闪烁', ok: '平稳', unknown: '样本不足' }[verdict.kind];
-  setInspectText(`扫描 ${scanSamples.length + 1} 帧：<b class="${verdict.kind === 'ok' ? '' : 'hit'}">${label}</b>\n${verdict.text}\n柱子=相邻帧变化量，横线=区间常态，点柱子可跳过去`);
+  const breathLine = breathing && breathing.kind !== 'unknown'
+    ? `\n接缝：<b class="${breathing.kind === 'ok' ? '' : 'hit'}">${breathing.text}</b>`
+    : '';
+  setInspectText(`扫描 ${scanSamples.length + 1} 帧：<b class="${verdict.kind === 'ok' ? '' : 'hit'}">${label}</b>\n${verdict.text}${breathLine}\n柱子=相邻帧变化量，横线=区间常态，点柱子可跳过去`);
   $('scan-flag-btn').hidden = !verdict.peak || verdict.kind === 'ok';
   $('scan-flag-btn').dataset.frame = verdict.peak ? String(verdict.peak.frame) : '';
 }
