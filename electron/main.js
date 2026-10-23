@@ -37,6 +37,18 @@ function runtimeBinary(name) {
   return file;
 }
 
+function registerLocalPickerIpc() {
+  ipcMain.handle('dialog:pick-local-videos', async event => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(win, {
+      title: '选择本地视频或文件夹',
+      buttonLabel: '检查',
+      properties: ['openFile', 'openDirectory', 'multiSelections']
+    });
+    return result.canceled ? [] : result.filePaths;
+  });
+}
+
 function registerWindowIpc() {
   ipcMain.handle('window:set-bounds', (event, requested) => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -76,7 +88,9 @@ async function createWindow() {
     authToken,
     migrationInfo,
     logger: message => appendLog(paths.serverLog, message),
-    openExternal: url => shell.openExternal(url)
+    openExternal: url => shell.openExternal(url),
+    // 本地文件删除走系统废纸篓，避免不可恢复的删除。
+    trashItem: filePath => shell.trashItem(filePath)
   });
 
   const origin = serverHandle.url;
@@ -144,6 +158,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     registerWindowIpc();
+    registerLocalPickerIpc();
     return createWindow();
   }).catch(error => {
     dialog.showErrorBox('视频检查器启动失败', error.stack || error.message);

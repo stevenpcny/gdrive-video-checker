@@ -6,7 +6,7 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { createVideoCheckerServer } = require('../server');
+const { createVideoCheckerServer, parseMediaInfo, bitDepthOf, snapFps, playableInChromium, sanitizeFlags } = require('../server');
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'video-checker-test-'));
@@ -36,6 +36,15 @@ if (command.includes('-vf')) {
       fs.writeFileSync(output, 'fake-jpeg');
     });
   }).on('error', () => process.exit(3));
+} else if (command.includes('-hide_banner')) {
+  // 只给 -i 的探测：把真实 ffmpeg 的输出格式打到 stderr，并以 1 退出
+  process.stderr.write([
+    "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'x':",
+    '  Duration: 00:00:04.00, start: 0.000000, bitrate: 29550 kb/s',
+    '  Stream #0:0[0x1]: Video: hevc (Main 10), yuv420p10le(tv, bt709/bt709/bt709, progressive), 1920x1080, 29550 kb/s, 23.98 fps, 23.98 tbr, 12800 tbn',
+    'At least one output file must be specified'
+  ].join('\\n'));
+  process.exit(1);
 } else if (command.includes('listremotes')) {
   const content = config && fs.existsSync(config) ? fs.readFileSync(config, 'utf8') : '';
   const names = [...content.matchAll(/^\\[([^\\]]+)\\]/gm)].map(m => m[1] + ':');
@@ -95,17 +104,17 @@ test('embedded server authenticates, persists settings, and closes', async t => 
 
   const headers = { 'X-Video-Checker-Token': 'test-token' };
   const health = await fetch(`${handle.url}/api/health`, { headers });
-  assert.deepEqual(await health.json(), { ok: true, app: 'video-checker', apiVersion: 10 });
+  assert.deepEqual(await health.json(), { ok: true, app: 'video-checker', apiVersion: 11 });
 
   const settings = await fetch(`${handle.url}/api/settings`, {
     method: 'POST',
     headers: { ...headers, Origin: handle.url },
-    body: JSON.stringify({ remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8 })
+    body: JSON.stringify({ remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5 })
   });
   assert.equal(settings.status, 200);
-  assert.deepEqual(await settings.json(), { remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8 });
+  assert.deepEqual(await settings.json(), { remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5 });
   assert.deepEqual(JSON.parse(fs.readFileSync(options.settingsFile, 'utf8')), {
-    remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8
+    remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5
   });
 
   const imported = await fetch(`${handle.url}/api/remotes/import-config`, {
@@ -364,4 +373,141 @@ test('public Drive video preloads into RAM and generates scrub thumbnails', asyn
   const thumbs = await fetch(`${handle.url}/api/public/thumbs`, { method: 'POST', headers, body });
   assert.equal(thumbs.status, 200);
   assert.equal((await thumbs.json()).count, 1);
+});
+
+test('本地模式只开放拖入的文件夹，并能读出分辨率/帧率/色深', async () => {
+  const { root, options } = fixture();
+  const handle = await createVideoCheckerServer(options);
+  const headers = { 'X-Video-Checker-Token': 'test-token', Host: new URL(handle.url).host };
+  const writeHeaders = { ...headers, Origin: handle.url, 'Content-Type': 'application/json' };
+  const dir = path.join(root, 'local-videos');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'shot01.mov'), 'local-video-bytes');
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'not a video');
+  fs.writeFileSync(path.join(root, 'secret.txt'), 'must stay unreachable');
+
+  const openResponse = await fetch(`${handle.url}/api/local/open`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ paths: [path.join(dir, 'shot01.mov')] })
+  });
+  assert.equal(openResponse.status, 200);
+  const opened = await openResponse.json();
+  assert.equal(opened.dir, fs.realpathSync(dir));
+  assert.deepEqual(opened.startNames, ['shot01.mov']);
+  assert.ok(opened.entries.some(entry => entry.Name === 'shot01.mov' && entry.Size === 17));
+
+  const listed = await fetch(`${handle.url}/api/list?remote=${encodeURIComponent(opened.remote)}&path=`, { headers });
+  assert.equal(listed.status, 200);
+  assert.ok((await listed.json()).entries.some(entry => entry.Name === 'notes.txt'));
+
+  const ranged = await fetch(`${handle.url}/stream/${encodeURIComponent(opened.remote)}/shot01.mov`, {
+    headers: { ...headers, Range: 'bytes=0-4' }
+  });
+  assert.equal(ranged.status, 206);
+  assert.equal(ranged.headers.get('content-range'), 'bytes 0-4/17');
+  assert.equal(await ranged.text(), 'local');
+
+  const escaped = await fetch(`${handle.url}/stream/${encodeURIComponent(opened.remote)}/${encodeURIComponent('../secret.txt')}`, { headers });
+  assert.equal(escaped.status, 400);
+
+  const stale = await fetch(`${handle.url}/stream/local-0000000000000000/shot01.mov`, { headers });
+  assert.equal(stale.status, 400);
+
+  const probed = await fetch(`${handle.url}/api/probe`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ remote: opened.remote, path: 'shot01.mov' })
+  });
+  assert.equal(probed.status, 200);
+  const info = await probed.json();
+  assert.equal(info.width, 1920);
+  assert.equal(info.height, 1080);
+  assert.equal(info.bitDepth, 10);
+  assert.equal(info.codec, 'hevc');
+  assert.equal(info.playable, null);
+  assert.ok(Math.abs(info.fps - 24000 / 1001) < 1e-6, '23.98 应该还原成 24000/1001');
+
+  const moved = await fetch(`${handle.url}/api/move`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ remote: opened.remote, from: 'shot01.mov', to: '不合格/shot01.mov' })
+  });
+  assert.equal(moved.status, 200);
+  assert.ok(fs.existsSync(path.join(dir, '不合格', 'shot01.mov')));
+
+  await handle.close();
+});
+
+test('媒体信息解析覆盖真实 ffmpeg 输出的几种写法', () => {
+  const prores = parseMediaInfo([
+    '  Duration: 00:00:02.00, start: 0.000000, bitrate: 29554 kb/s',
+    '  Stream #0:0[0x1]: Video: prores (apch / 0x68637061), yuv422p10le(tv, progressive), 1920x1080, 29550 kb/s, SAR 1:1 DAR 16:9, 25 fps, 25 tbr, 12800 tbn (default)'
+  ].join('\n'));
+  assert.equal(prores.codec, 'prores');
+  assert.equal(prores.bitDepth, 10);
+  assert.equal(prores.fps, 25);
+  assert.equal(prores.width, 1920);
+  assert.equal(prores.playable, false);
+
+  const h264 = parseMediaInfo('  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p, 1280x720 [SAR 1:1 DAR 16:9], 1475 kb/s, 23.98 fps, 23.98 tbr, 24k tbn (default)');
+  assert.equal(h264.codec, 'h264');
+  assert.equal(h264.bitDepth, 8);
+  assert.equal(h264.playable, null);
+
+  // 色彩描述里带逗号，不能把像素格式切坏
+  const hdr = parseMediaInfo('  Stream #0:0: Video: hevc, yuv420p10le(tv, bt709/unknown/unknown, progressive), 3840x2160, SAR 1:1 DAR 16:9, 29.97 fps, 29.97 tbr, 1k tbn');
+  assert.equal(hdr.pixFmt, 'yuv420p10le');
+  assert.equal(hdr.colorTags, 'tv, bt709/unknown/unknown, progressive');
+  assert.equal(hdr.bitDepth, 10);
+  assert.ok(Math.abs(hdr.fps - 30000 / 1001) < 1e-6);
+
+  assert.equal(bitDepthOf('p010le'), 10);
+  assert.equal(bitDepthOf('yuvj420p'), 8);
+  assert.equal(snapFps(59.94), 60000 / 1001);
+  assert.equal(snapFps(12.5), 12.5);
+  assert.equal(playableInChromium('prores'), false);
+  assert.equal(playableInChromium('h264'), null, 'h264/hevc 的可播性交给播放器，不提前猜');
+  assert.equal(playableInChromium('hevc'), null);
+});
+
+test('穿帮点与合格状态互不覆盖，并随重命名一起迁移', async () => {
+  const { options } = fixture();
+  const handle = await createVideoCheckerServer(options);
+  const headers = { 'X-Video-Checker-Token': 'test-token', Host: new URL(handle.url).host, Origin: handle.url, 'Content-Type': 'application/json' };
+  const post = body => fetch(`${handle.url}/api/marks`, { method: 'POST', headers, body: JSON.stringify(body) });
+  const read = async () => (await fetch(`${handle.url}/api/marks`, { headers })).json();
+
+  // 只写 flags，不该产生 status
+  await post({ key: 'drive:a.mp4', flags: [{ frame: 11, t: 0.48 }, { frame: 3, t: 0.14 }] });
+  let marks = await read();
+  assert.equal(marks['drive:a.mp4'].status, undefined);
+  assert.deepEqual(marks['drive:a.mp4'].flags, [{ frame: 3, t: 0.14 }, { frame: 11, t: 0.48 }], '应按帧号排序');
+
+  // 再写 status，flags 必须保住
+  await post({ key: 'drive:a.mp4', status: 'bad' });
+  marks = await read();
+  assert.equal(marks['drive:a.mp4'].status, 'bad');
+  assert.equal(marks['drive:a.mp4'].flags.length, 2, 'status 写入不能冲掉穿帮点');
+
+  // 反过来写 flags，status 也要保住
+  await post({ key: 'drive:a.mp4', flags: [{ frame: 3, t: 0.14 }] });
+  marks = await read();
+  assert.equal(marks['drive:a.mp4'].status, 'bad');
+  assert.equal(marks['drive:a.mp4'].flags.length, 1);
+
+  // 非法输入被清洗掉；去重保留一条
+  await post({ key: 'drive:b.mp4', flags: [{ frame: -1 }, { frame: 2.5 }, { frame: 7, t: 'x' }, { frame: 7, t: 1.5 }] });
+  marks = await read();
+  assert.deepEqual(marks['drive:b.mp4'].flags, [{ frame: 7, t: 1.5 }]);
+
+  // 清空后条目整个消失
+  await post({ key: 'drive:b.mp4', flags: [] });
+  marks = await read();
+  assert.equal(marks['drive:b.mp4'], undefined);
+
+  assert.deepEqual(sanitizeFlags('nope'), []);
+  assert.equal(sanitizeFlags(Array.from({ length: 600 }, (_, i) => ({ frame: i, t: i }))).length, 500);
+
+  await handle.close();
 });

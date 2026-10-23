@@ -16,8 +16,27 @@ const THUMB_FPS = 10;
 const THUMB_PROFILE = '10fps-240w-v2';
 const PUBLIC_THUMB_FPS = 2;
 const PUBLIC_THUMB_PROFILE = '2fps-240w-v1';
-const API_VERSION = 10;
+const API_VERSION = 11;
 const LIST_CACHE_TTL_MS = 30_000;
+const LOCAL_PREFIX = 'local-';
+const LOCAL_ROOT_MAX = 50;
+const PROBE_CACHE_MAX = 300;
+const MAX_FLAGS_PER_VIDEO = 500;
+// ffmpeg 只打印两位小数的帧率，逐帧步进必须用精确值，否则 100 帧会偏掉 1 帧多。
+const COMMON_FPS = [24000 / 1001, 24, 25, 30000 / 1001, 30, 48, 50, 60000 / 1001, 60, 100, 120000 / 1001, 120];
+// 名字里不带「pNN」的高位深格式，只能查表。
+const BIT_DEPTH_FIX = { p010le: 10, p010be: 10, p210le: 10, p410le: 10, p016le: 16, v210: 10, v410: 10, nv20le: 10, xv30le: 10, x2rgb10le: 10, x2bgr10le: 10 };
+const LOCAL_VIDEO_MIME = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
+  '.ts': 'video/mp2t',
+  '.mts': 'video/mp2t',
+  '.m2ts': 'video/mp2t',
+  '.avi': 'video/x-msvideo'
+};
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -91,6 +110,105 @@ function resolveInside(base, rel) {
 
 const encSegs = p => p.split('/').map(encodeURIComponent).join('/');
 
+// 穿帮点：{frame, t}，帧号为准，t 只是给人看的秒数
+function sanitizeFlags(input) {
+  if (!Array.isArray(input)) return [];
+  const byFrame = new Map();
+  for (const item of input) {
+    const frame = Number(item && item.frame);
+    if (!Number.isInteger(frame) || frame < 0 || frame > 10_000_000) continue;
+    const t = Number(item.t);
+    byFrame.set(frame, { frame, t: Number.isFinite(t) && t >= 0 ? Number(t.toFixed(3)) : 0 });
+  }
+  return [...byFrame.values()].sort((a, b) => a.frame - b.frame).slice(0, MAX_FLAGS_PER_VIDEO);
+}
+
+function snapFps(value) {
+  if (!(value > 0)) return 0;
+  let best = value;
+  let bestDiff = Infinity;
+  for (const candidate of COMMON_FPS) {
+    const diff = Math.abs(candidate - value);
+    if (diff < bestDiff) { bestDiff = diff; best = candidate; }
+  }
+  return bestDiff <= 0.05 ? best : value;
+}
+
+function bitDepthOf(pixFmt) {
+  if (!pixFmt) return 0;
+  const name = pixFmt.toLowerCase();
+  if (BIT_DEPTH_FIX[name]) return BIT_DEPTH_FIX[name];
+  const planar = /p(\d{1,2})(?:le|be)?$/.exec(name);
+  if (planar) return Number(planar[1]);
+  const gray = /^(?:gray|y)(\d{1,2})(?:le|be)$/.exec(name);
+  if (gray) return Number(gray[1]);
+  return 8;
+}
+
+// 只回答「确定放不了」：这些编码 Chromium 根本没有解码器。
+// h264/hevc/vp9/av1 的实际可播性取决于系统解码器和 profile（实测 High 10 的 h264 能软解），
+// 猜错会给出错误警告，所以一律返回 null，由播放器自己的 error 事件说了算。
+const NO_CHROMIUM_DECODER = new Set([
+  'prores', 'prores_raw', 'dnxhd', 'cfhd', 'ffv1', 'huffyuv', 'ffvhuff', 'utvideo', 'magicyuv',
+  'dvvideo', 'rawvideo', 'v210', 'mjpeg', 'mpeg1video', 'mpeg2video', 'mpeg4', 'msmpeg4v3',
+  'wmv1', 'wmv2', 'wmv3', 'vc1', 'flv1', 'svq3', 'theora', 'qtrle', 'speedhq'
+]);
+
+function playableInChromium(codec) {
+  if (!codec) return null;
+  return NO_CHROMIUM_DECODER.has(codec) ? false : null;
+}
+
+function parseMediaInfo(stderr) {
+  const info = {
+    codec: '', pixFmt: '', width: 0, height: 0, fps: 0, bitDepth: 0,
+    durationSec: 0, bitrateKbps: 0, colorTags: '', raw: ''
+  };
+  const duration = /Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(stderr);
+  if (duration) {
+    info.durationSec = Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3]);
+  }
+  const marker = ': Video: ';
+  const line = stderr.split('\n').find(text => /Stream #\d+:\d+.*: Video: /.test(text));
+  if (!line) return info;
+  info.raw = line.trim().slice(0, 400);
+  const body = line.slice(line.indexOf(marker) + marker.length);
+  // 括号里会出现逗号（yuv420p10le(tv, bt709/bt709/iec61966-2-1, progressive)），先摘出来再按逗号切字段。
+  const groups = [];
+  const flat = body.replace(/\(([^()]*)\)/g, (match, inner) => {
+    groups.push(inner);
+    return '\u0000' + (groups.length - 1) + '\u0000';
+  });
+  const fields = flat.split(/,\s*/).map(field => field.trim()).filter(Boolean);
+  info.codec = (fields[0] || '').split(/[\s\u0000]/)[0].toLowerCase();
+  for (const field of fields) {
+    const size = /^(\d{2,5})x(\d{2,5})\b/.exec(field);
+    if (size && !info.width) {
+      info.width = Number(size[1]);
+      info.height = Number(size[2]);
+      continue;
+    }
+    const fps = /^([\d.]+) fps$/.exec(field);
+    if (fps && !info.fps) {
+      info.fps = snapFps(Number(fps[1]));
+      continue;
+    }
+    const rate = /^(\d+) kb\/s$/.exec(field);
+    if (rate && !info.bitrateKbps) {
+      info.bitrateKbps = Number(rate[1]);
+      continue;
+    }
+    const pix = /^((?:yuv|yuvj|gbr|rgb|bgr|abgr|argb|gray|ya|nv|p0|p2|p4|v2|v4|x2|mono)[a-z0-9]*)(?:\u0000(\d+)\u0000)?$/.exec(field);
+    if (pix && !info.pixFmt) {
+      info.pixFmt = pix[1];
+      info.colorTags = pix[2] === undefined ? '' : (groups[Number(pix[2])] || '');
+    }
+  }
+  info.bitDepth = bitDepthOf(info.pixFmt);
+  info.playable = playableInChromium(info.codec);
+  return info;
+}
+
 function freePort(host) {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
@@ -120,6 +238,7 @@ async function createVideoCheckerServer(options = {}) {
   const migrationInfo = options.migrationInfo || null;
   const logger = options.logger || (message => console.log(message));
   const openExternal = options.openExternal || null;
+  const trashItem = options.trashItem || null;
   const publicDriveBaseUrl = options.publicDriveBaseUrl || 'https://drive.usercontent.google.com/download';
   const driveApiBaseUrl = options.driveApiBaseUrl || 'https://www.googleapis.com/drive/v3';
   const googleTokenUrl = options.googleTokenUrl || 'https://oauth2.googleapis.com/token';
@@ -150,6 +269,9 @@ async function createVideoCheckerServer(options = {}) {
   const permissionJobs = new Map();
   const listCache = new Map(); // remote/path -> { entries, expiresAt }
   const listJobs = new Map(); // remote/path -> in-flight Drive request
+  const localRoots = new Map(); // rootId -> { dir, atime } 用户主动拖入的本地文件夹
+  const probeCache = new Map(); // remote:path -> 媒体信息
+  const probeJobs = new Map();
   const ramVideoCache = new Map(); // key -> { buffer, size, atime }
   let ramCacheBytes = 0;
   let expectedOrigin = null;
@@ -169,15 +291,17 @@ async function createVideoCheckerServer(options = {}) {
   }
 
   function execTool(command, args, opts = {}) {
+    const { onChild, ...execOpts } = opts;
     return new Promise((resolve, reject) => {
       const proc = trackChild(execFile(command, args, {
         maxBuffer: opts.maxBuffer || 64 * 1024 * 1024,
-        ...opts
+        ...execOpts
       }, (err, stdout, stderr) => {
         if (err) reject(new Error((stderr || '').trim() || err.message));
         else resolve(stdout);
       }));
       proc.on('error', reject);
+      if (onChild) onChild(proc);
     });
   }
 
@@ -323,6 +447,9 @@ async function createVideoCheckerServer(options = {}) {
   }
 
   async function listDirectory(remote, relPath) {
+    if (isLocalRemote(remote)) {
+      return { entries: listLocalDirectory(localFilePath(remote, relPath)), cached: false };
+    }
     const key = listCacheKey(remote, relPath);
     const cached = listCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return { entries: cached.entries, cached: true };
@@ -352,6 +479,8 @@ async function createVideoCheckerServer(options = {}) {
   }
 
   async function ensureRemote(name) {
+    if (isLocalRemote(name)) return;
+    if (typeof name === 'string' && name.startsWith(LOCAL_PREFIX)) throw new Error('本地文件夹未注册，请重新拖入');
     const base = name.split(',')[0];
     if (!knownRemotes.has(base)) await refreshRemotes();
     if (!knownRemotes.has(base)) throw new Error('未知账号: ' + base);
@@ -464,7 +593,7 @@ async function createVideoCheckerServer(options = {}) {
   }
 
   function readSettings() {
-    return readJson(settingsFile, { remote: '', sortMode: 'name', subdir: '不合格', ramCacheGb: 0, ramMaxVideoGb: 0, holdSeekRate: 4 });
+    return readJson(settingsFile, { remote: '', sortMode: 'name', subdir: '不合格', ramCacheGb: 0, ramMaxVideoGb: 0, holdSeekRate: 4, playbackRate: 1 });
   }
 
   function writeSettings(settings) {
@@ -535,6 +664,11 @@ async function createVideoCheckerServer(options = {}) {
     }
   }
 
+  function killOauthChild(session) {
+    if (session.proc && !session.proc.killed) session.proc.kill('SIGTERM');
+    session.proc = null;
+  }
+
   async function oauthStep(session, state, result) {
     const values = ['scope', 'drive'];
     if (session.clientId) values.push('client_id', session.clientId);
@@ -542,7 +676,13 @@ async function createVideoCheckerServer(options = {}) {
     const args = state
       ? ['config', 'update', session.name, ...values, '--continue', '--state', state, '--result', String(result ?? ''), '--non-interactive']
       : ['config', 'create', session.name, 'drive', ...values, '--all', '--non-interactive'];
-    const question = parseConfigQuestion(await rclone(args));
+    let output;
+    try {
+      output = await rclone(args, { onChild: (proc) => { session.proc = proc; } });
+    } finally {
+      session.proc = null;
+    }
+    const question = parseConfigQuestion(output);
     if (!question.State) {
       await rclone(['lsd', session.name + ':', '--max-depth', '1']);
       await refreshRemotes();
@@ -618,6 +758,133 @@ async function createVideoCheckerServer(options = {}) {
     upstream.end();
   }
 
+  const isLocalRemote = name => typeof name === 'string'
+    && name.startsWith(LOCAL_PREFIX)
+    && localRoots.has(name.slice(LOCAL_PREFIX.length));
+
+  // 本地模式只开放用户主动拖入/选择的文件夹：rootId 换算成真实目录，relPath 一律过 resolveInside，
+  // 避免这个 HTTP 接口变成任意本地文件读取。
+  function registerLocalRoot(dir) {
+    const real = fs.realpathSync(dir);
+    if (!fs.statSync(real).isDirectory()) throw new Error('不是文件夹: ' + dir);
+    const id = crypto.createHash('md5').update(real).digest('hex').slice(0, 16);
+    localRoots.set(id, { dir: real, atime: Date.now() });
+    if (localRoots.size > LOCAL_ROOT_MAX) {
+      const oldest = [...localRoots.entries()].sort((a, b) => a[1].atime - b[1].atime)[0];
+      if (oldest && oldest[0] !== id) localRoots.delete(oldest[0]);
+    }
+    return LOCAL_PREFIX + id;
+  }
+
+  function localRootDir(remote) {
+    const root = localRoots.get(String(remote).slice(LOCAL_PREFIX.length));
+    if (!root) throw new Error('本地文件夹未注册，请重新拖入');
+    root.atime = Date.now();
+    return root.dir;
+  }
+
+  function localFilePath(remote, relPath) {
+    const full = resolveInside(localRootDir(remote), relPath);
+    if (!full) throw new Error('非法路径');
+    return full;
+  }
+
+  function listLocalDirectory(dir) {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter(entry => !entry.name.startsWith('.'))
+      .map(entry => {
+        let stat;
+        try { stat = fs.statSync(path.join(dir, entry.name)); } catch { return null; }
+        const isDir = stat.isDirectory();
+        if (!isDir && !stat.isFile()) return null;
+        return {
+          Name: entry.name,
+          Size: isDir ? -1 : stat.size,
+          ModTime: new Date(stat.mtimeMs).toISOString(),
+          IsDir: isDir
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function serveLocalFile(req, res, full) {
+    const size = fs.statSync(full).size;
+    const type = LOCAL_VIDEO_MIME[path.extname(full).toLowerCase()] || 'video/mp4';
+    const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+    let start = 0;
+    let end = size - 1;
+    let partial = false;
+    if (match && (match[1] || match[2])) {
+      start = match[1] ? parseInt(match[1]) : size - parseInt(match[2]);
+      end = match[1] && match[2] ? Math.min(parseInt(match[2]), size - 1) : size - 1;
+      partial = true;
+      if (!(start >= 0 && start <= end && end < size)) {
+        res.writeHead(416, { 'Content-Range': `bytes */${size}` });
+        res.end();
+        return;
+      }
+    }
+    res.writeHead(partial ? 206 : 200, {
+      'Content-Type': type,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': end - start + 1,
+      ...(partial ? { 'Content-Range': `bytes ${start}-${end}/${size}` } : {})
+    });
+    const stream = fs.createReadStream(full, { start, end });
+    stream.on('error', () => res.destroy());
+    stream.pipe(res);
+    req.on('close', () => stream.destroy());
+  }
+
+  function moveLocalEntry(remote, from, to, isDir) {
+    const src = localFilePath(remote, from);
+    const dest = localFilePath(remote, to);
+    if (isDir) {
+      if (path.posix.basename(to) !== path.posix.basename(from)) throw new Error('移动文件夹时不能改名');
+      if (to === from || to.startsWith(from + '/')) throw new Error('不能移入文件夹自身或它的子目录');
+    }
+    if (fs.existsSync(dest)) throw new Error(`目标位置已有「${path.posix.basename(to)}」`);
+    ensureDir(path.dirname(dest), 0o755);
+    fs.renameSync(src, dest);
+    probeCache.delete(cacheKey(remote, from));
+  }
+
+  function ffmpegInput(remote, relPath) {
+    return isLocalRemote(remote)
+      ? localFilePath(remote, relPath)
+      : `${expectedOrigin}/stream/${encodeURIComponent(remote)}/${encSegs(relPath)}`;
+  }
+
+  // 自带 ffmpeg 关掉了 ffprobe，分辨率/帧率/色深只能从 `ffmpeg -i` 的 stderr 里解析。
+  function probeMedia(remote, relPath, refresh = false) {
+    const key = cacheKey(remote, relPath);
+    if (!refresh && probeCache.has(key)) return Promise.resolve(probeCache.get(key));
+    if (probeJobs.has(key)) return probeJobs.get(key);
+    const job = new Promise((resolve, reject) => {
+      const args = ['-hide_banner'];
+      if (!isLocalRemote(remote) && authToken) args.push('-headers', `X-Video-Checker-Token: ${authToken}\r\n`);
+      args.push('-i', ffmpegInput(remote, relPath));
+      const proc = trackChild(spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] }));
+      let stderr = '';
+      const timer = setTimeout(() => proc.kill('SIGKILL'), 20_000);
+      proc.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-8000); });
+      proc.on('error', error => { clearTimeout(timer); reject(error); });
+      // 只给 -i 不给输出文件时 ffmpeg 必然以 1 退出，元数据照样打印在 stderr，所以不看退出码。
+      proc.on('exit', () => {
+        clearTimeout(timer);
+        const info = parseMediaInfo(stderr);
+        if (!info.width || !info.height) {
+          return reject(new Error('读取视频信息失败: ' + (stderr.trim().split('\n').pop() || '').slice(0, 200)));
+        }
+        if (probeCache.size >= PROBE_CACHE_MAX) probeCache.delete(probeCache.keys().next().value);
+        probeCache.set(key, info);
+        resolve(info);
+      });
+    }).finally(() => probeJobs.delete(key));
+    probeJobs.set(key, job);
+    return job;
+  }
+
   function readBody(req, limit = 1024 * 1024) {
     return new Promise((resolve, reject) => {
       let buf = '';
@@ -637,6 +904,7 @@ async function createVideoCheckerServer(options = {}) {
   const publicCacheKey = (fileId, resourceKey = '') => cacheKey('__public__', fileId + ':' + resourceKey);
 
   function cleanupLocal(remote, relPath) {
+    probeCache.delete(cacheKey(remote, relPath));
     const key = cacheKey(remote, relPath);
     const cached = ramVideoCache.get(key);
     if (cached) {
@@ -660,6 +928,11 @@ async function createVideoCheckerServer(options = {}) {
   }
 
   function warmCache(remote, relPath, size = 0) {
+    // 本地文件本来就在磁盘上，不占 RAM 缓存，直接当已就绪。
+    if (isLocalRemote(remote)) {
+      const full = localFilePath(remote, relPath);
+      return Promise.resolve({ cached: true, size: fs.statSync(full).size, local: true });
+    }
     const key = cacheKey(remote, relPath);
     const cached = ramVideoCache.get(key);
     if (cached) {
@@ -812,9 +1085,9 @@ async function createVideoCheckerServer(options = {}) {
     ensureDir(dir);
     const job = new Promise((resolve, reject) => {
       const args = ['-y'];
-      if (authToken) args.push('-headers', `X-Video-Checker-Token: ${authToken}\r\n`);
+      if (!isLocalRemote(remote) && authToken) args.push('-headers', `X-Video-Checker-Token: ${authToken}\r\n`);
       args.push(
-        '-i', `${expectedOrigin}/stream/${encodeURIComponent(remote)}/${encSegs(relPath)}`,
+        '-i', ffmpegInput(remote, relPath),
         '-vf', `fps=${THUMB_FPS},scale=240:-2`,
         '-q:v', '6', path.join(dir, '%05d.jpg')
       );
@@ -944,6 +1217,7 @@ async function createVideoCheckerServer(options = {}) {
           next.ramMaxVideoGb = Number(body.ramMaxVideoGb);
         }
         if ([0.5, 1, 2, 4, 8, 16].includes(Number(body.holdSeekRate))) next.holdSeekRate = Number(body.holdSeekRate);
+        if (Number(body.playbackRate) >= 0.0625 && Number(body.playbackRate) <= 4) next.playbackRate = Number(body.playbackRate);
         writeSettings(next);
         evictRamCache();
         return json(res, 200, next);
@@ -1031,6 +1305,11 @@ async function createVideoCheckerServer(options = {}) {
         const from = safePath(body.from), to = safePath(body.to);
         if (!from || !to) return json(res, 400, { error: '非法路径' });
         await ensureRemote(body.remote);
+        if (isLocalRemote(body.remote)) {
+          moveLocalEntry(body.remote, from, to, body.isDir);
+          if (body.isDir) moveMarksWithFolder(body.remote, from, to);
+          return json(res, 200, { ok: true });
+        }
         if (body.isDir) {
           const sourceName = path.posix.basename(from);
           const destinationParent = path.posix.dirname(to) === '.' ? '' : path.posix.dirname(to);
@@ -1052,6 +1331,10 @@ async function createVideoCheckerServer(options = {}) {
         const from = safePath(body.from), to = safePath(body.to);
         if (!from || !to) return json(res, 400, { error: '非法路径' });
         await ensureRemote(body.remote);
+        if (isLocalRemote(body.remote)) {
+          moveLocalEntry(body.remote, from, to, body.isDir);
+          return json(res, 200, { ok: true });
+        }
         await rclone(['moveto', body.remote + ':' + from, body.remote + ':' + to]);
         invalidateListCache(body.remote);
         cleanupLocal(body.remote, from);
@@ -1063,6 +1346,13 @@ async function createVideoCheckerServer(options = {}) {
         const relPath = safePath(body.path);
         if (!relPath) return json(res, 400, { error: '非法路径' });
         await ensureRemote(body.remote);
+        if (isLocalRemote(body.remote)) {
+          if (!trashItem) return json(res, 400, { error: '本地删除只能在应用内进行' });
+          const full = localFilePath(body.remote, relPath);
+          await trashItem(full);
+          cleanupLocal(body.remote, relPath);
+          return json(res, 200, { ok: true, trashed: true });
+        }
         await rclone([body.isDir ? 'purge' : 'deletefile', body.remote + ':' + relPath]);
         invalidateListCache(body.remote);
         cleanupLocal(body.remote, relPath);
@@ -1131,8 +1421,17 @@ async function createVideoCheckerServer(options = {}) {
       if (url.pathname === '/api/marks' && req.method === 'POST') {
         const body = await readBody(req);
         const marks = readMarks();
-        if (body.status === null) delete marks[body.key];
-        else marks[body.key] = { status: body.status, time: new Date().toISOString() };
+        const prev = marks[body.key] || {};
+        // status 和 flags 互不覆盖：只传其中一个时，另一个保持原样
+        const status = body.status === undefined ? prev.status : body.status;
+        const flags = body.flags === undefined ? (prev.flags || []) : sanitizeFlags(body.flags);
+        if (!status && !flags.length) delete marks[body.key];
+        else {
+          const entry = { time: new Date().toISOString() };
+          if (status) entry.status = status;
+          if (flags.length) entry.flags = flags;
+          marks[body.key] = entry;
+        }
         writeMarks(marks);
         return json(res, 200, { ok: true });
       }
@@ -1158,12 +1457,15 @@ async function createVideoCheckerServer(options = {}) {
         if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) return json(res, 400, { error: '名称只能用字母数字-_（32字内）' });
         await refreshRemotes();
         if (knownRemotes.has(name)) return json(res, 409, { error: '该账号名称已存在' });
+        // 清理上一次未走完的授权：残留的 rclone 会一直占着 127.0.0.1:53682
+        for (const stale of oauthSessions.values()) killOauthChild(stale);
         const session = {
           id: crypto.randomBytes(16).toString('hex'),
           name,
           clientId: typeof body.clientId === 'string' ? body.clientId.trim() : '',
           clientSecret: typeof body.clientSecret === 'string' ? body.clientSecret.trim() : '',
-          state: ''
+          state: '',
+          proc: null
         };
         oauthSessions.set(session.id, session);
         try {
@@ -1197,6 +1499,7 @@ async function createVideoCheckerServer(options = {}) {
         const body = await readBody(req);
         const session = oauthSessions.get(body.sessionId);
         if (session) {
+          killOauthChild(session);
           oauthSessions.delete(session.id);
           await rclone(['config', 'delete', session.name]).catch(() => {});
         }
@@ -1234,6 +1537,34 @@ async function createVideoCheckerServer(options = {}) {
         return json(res, 200, { ok: true, remote: name + ':', email: key.client_email });
       }
 
+      if (url.pathname === '/api/local/open' && req.method === 'POST') {
+        const body = await readBody(req);
+        const inputs = Array.isArray(body.paths) ? body.paths.filter(item => typeof item === 'string' && item) : [];
+        if (!inputs.length) return json(res, 400, { error: '没有收到本地路径' });
+        let dir = '';
+        let startNames = [];
+        for (const item of inputs) {
+          let stat;
+          try { stat = fs.statSync(item); } catch { return json(res, 400, { error: '找不到: ' + item }); }
+          if (stat.isDirectory()) { dir = item; startNames = []; break; }
+          const parent = path.dirname(item);
+          if (!dir) dir = parent;
+          if (parent === dir) startNames.push(path.basename(item));
+        }
+        if (!dir) return json(res, 400, { error: '没有可用的本地文件' });
+        const remote = registerLocalRoot(dir);
+        const root = localRootDir(remote);
+        return json(res, 200, { remote, dir: root, entries: listLocalDirectory(root), startNames });
+      }
+
+      if (url.pathname === '/api/probe' && req.method === 'POST') {
+        const body = await readBody(req);
+        const relPath = safePath(body.path);
+        if (!relPath) return json(res, 400, { error: '非法路径' });
+        await ensureRemote(body.remote);
+        return json(res, 200, await probeMedia(body.remote, relPath, !!body.refresh));
+      }
+
       if (url.pathname === '/api/prefetch' && req.method === 'POST') {
         const body = await readBody(req);
         const relPath = safePath(body.path);
@@ -1266,6 +1597,12 @@ async function createVideoCheckerServer(options = {}) {
         if (slash < 1) return json(res, 400, { error: '缺少账号段' });
         const remote = decodeURIComponent(rest.slice(0, slash));
         const relPath = decodeURIComponent(rest.slice(slash + 1));
+        if (remote.startsWith(LOCAL_PREFIX)) {
+          if (!isLocalRemote(remote)) return json(res, 400, { error: '本地文件夹未注册，请重新拖入' });
+          const safe = safePath(relPath);
+          if (!safe) return json(res, 400, { error: '非法路径' });
+          return serveLocalFile(req, res, localFilePath(remote, safe));
+        }
         const local = ramVideoCache.get(cacheKey(remote, relPath));
         if (local) return serveLocal(req, res, local, relPath);
         const serve = await getServe(remote);
@@ -1368,5 +1705,10 @@ module.exports = {
   createVideoCheckerServer,
   safePath,
   resolveInside,
-  writeJsonAtomic
+  writeJsonAtomic,
+  sanitizeFlags,
+  parseMediaInfo,
+  snapFps,
+  bitDepthOf,
+  playableInChromium
 };

@@ -110,12 +110,72 @@
   #seek-handle { position: absolute; top: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.6); margin-left: -10px; left: 0; }
   #seekbar.dragging #seek-handle { transform: scale(1.25); }
   #seek-tip { position: absolute; bottom: 30px; transform: translateX(-50%); background: #000c; padding: 2px 8px; border-radius: 4px; font-size: 12px; display: none; pointer-events: none; }
-  #seek-info { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); padding: 2px 2px 6px; }
+  #seek-info { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--dim); padding: 2px 2px 6px; }
 
   #bar { padding: 8px 16px 10px; background: var(--panel); border-top: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  #cur-name { flex: 1; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-  #speed { color: var(--dim); font-size: 12px; min-width: 42px; }
-  #load-state { color: var(--dim); font-size: 12px; }
+  #cur-name { flex: 1; min-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  #speed { color: var(--dim); font-size: 12px; }
+  #speed-box { color: var(--dim); font-size: 12px; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  #speed-sel { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 2px 4px; font-size: 12px; }
+  /* 查穿帮用的几个视图 */
+  #fx-canvas { position: absolute; pointer-events: none; z-index: 6; }
+  #roi-layer { position: absolute; inset: 0; z-index: 7; cursor: crosshair; }
+  #roi-box { position: absolute; border: 1px solid #ffb84d; background: rgba(255,184,77,.10); box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
+  #zoom-canvas { position: absolute; right: 12px; top: 12px; z-index: 8; border: 1px solid var(--border); border-radius: 6px; background: #000; image-rendering: pixelated; pointer-events: none; }
+  #inspect-panel { border-top: 1px solid var(--border); padding: 6px 12px 8px; font-size: 12px; }
+  #scan-chart { width: 100%; height: 44px; background: #23262c; border-radius: 4px; cursor: pointer; }
+  #inspect-text { color: var(--dim); margin-top: 5px; line-height: 1.55; white-space: pre-line; }
+  #inspect-text b { color: var(--text); font-weight: 600; }
+  #inspect-text .hit { color: var(--bad); }
+  .insp-actions { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .insp-actions button { padding: 2px 8px; font-size: 11px; }
+  .insp-actions button.on { background: var(--accent); border-color: var(--accent); color: #10131a; }
+
+  /* A/B 对比 */
+  #cmp-canvas { position: absolute; pointer-events: none; z-index: 6; }
+  #cmp-panel { border-top: 1px solid var(--border); padding: 6px 12px 8px; font-size: 12px; }
+  #cmp-src { width: 100%; margin-top: 5px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .cmp-label { color: var(--dim); align-self: center; }
+  #cmp-offset { color: var(--text); align-self: center; font-variant-numeric: tabular-nums; min-width: 42px; text-align: center; }
+  #cmp-status { color: var(--dim); margin-top: 5px; line-height: 1.5; white-space: pre-line; }
+  #cmp-status b { color: var(--text); }
+  #cmp-status .hit { color: var(--bad); }
+  body.cmp-wipe #player-wrap { cursor: ew-resize; }
+
+  /* 穿帮点 / 区间循环 */
+  /* 覆盖在进度条轨道上，所以放在 #seekbar 里而不是会裁剪的 #seek-track 里 */
+  /* 琥珀色：进度条已播部分是蓝的，循环区间不能也用蓝 */
+  #seek-loop { position: absolute; top: 6px; height: 14px; background: rgba(255,184,77,.22); border-left: 2px solid #ffb84d; border-right: 2px solid #ffb84d; box-sizing: border-box; pointer-events: none; }
+  #seek-flags { position: absolute; left: 0; right: 0; top: 5px; height: 16px; pointer-events: none; }
+  #seek-flags i { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--bad); border-radius: 1px; }
+  #flag-panel { border-top: 1px solid var(--border); padding: 6px 12px 8px; font-size: 12px; max-height: 190px; display: flex; flex-direction: column; }
+  .flag-head { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+  #flag-title { flex: 1; }
+  .flag-head button { padding: 1px 8px; font-size: 11px; }
+  #flag-list { overflow-y: auto; margin-top: 4px; }
+  .flag-row { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; font-variant-numeric: tabular-nums; }
+  .flag-row:hover { background: #2c3038; }
+  .flag-row .frame { color: var(--bad); }
+  .flag-row .at { color: var(--dim); flex: 1; }
+  .flag-row .del { color: var(--dim); padding: 0 4px; }
+  .flag-row .del:hover { color: var(--bad); }
+  #loop-state { color: #ffb84d; margin-top: 4px; min-height: 15px; }
+  .ask-card input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; font-size: 14px; box-sizing: border-box; }
+  #ask-hint { color: var(--dim); font-size: 12px; margin-top: 6px; min-height: 14px; }
+
+  #vinfo { color: var(--dim); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #vinfo.warn { color: var(--bad); }
+  #frame-info { color: var(--dim); font-variant-numeric: tabular-nums; }
+
+  /* 本地模式：隐藏只对 Drive 有意义的操作 */
+  body.local-mode #upload-btn,
+  body.local-mode #link-btn { display: none; }
+
+  #drop-hint { position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center;
+    background: rgba(20,22,26,.82); border: 3px dashed var(--accent); border-radius: 12px;
+    font-size: 20px; color: var(--text); pointer-events: none; }
+  #drop-hint[hidden] { display: none; }
+  #load-state { color: var(--dim); font-size: 12px; flex: 1; min-width: 0; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #load-state.ready { color: var(--ok); }
   button { background: #2c3038; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
   button:hover { background: #363b44; }
