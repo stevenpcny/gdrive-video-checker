@@ -109,12 +109,12 @@ test('embedded server authenticates, persists settings, and closes', async t => 
   const settings = await fetch(`${handle.url}/api/settings`, {
     method: 'POST',
     headers: { ...headers, Origin: handle.url },
-    body: JSON.stringify({ remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5 })
+    body: JSON.stringify({ remote: 'drive:', sortMode: 'new', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5 })
   });
   assert.equal(settings.status, 200);
-  assert.deepEqual(await settings.json(), { remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5 });
+  assert.deepEqual(await settings.json(), { remote: 'drive:', sortMode: 'new', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5 });
   assert.deepEqual(JSON.parse(fs.readFileSync(options.settingsFile, 'utf8')), {
-    remote: 'drive:', sortMode: 'new', subdir: 'Rejected', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5
+    remote: 'drive:', sortMode: 'new', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5
   });
 
   const imported = await fetch(`${handle.url}/api/remotes/import-config`, {
@@ -145,7 +145,7 @@ test('embedded server authenticates, persists settings, and closes', async t => 
   const folderMark = await fetch(`${handle.url}/api/marks`, {
     method: 'POST',
     headers: { ...headers, Origin: handle.url },
-    body: JSON.stringify({ key: 'drive:folder/source/video.mp4', status: 'ok' })
+    body: JSON.stringify({ key: 'drive:folder/source/video.mp4', flags: [{ frame: 5, t: 0.2 }] })
   });
   assert.equal(folderMark.status, 200);
 
@@ -158,7 +158,7 @@ test('embedded server authenticates, persists settings, and closes', async t => 
   const marksAfterFolderMove = await fetch(`${handle.url}/api/marks`, { headers });
   const movedMarks = await marksAfterFolderMove.json();
   assert.equal(movedMarks['drive:folder/source/video.mp4'], undefined);
-  assert.equal(movedMarks['drive:archive/source/video.mp4'].status, 'ok');
+  assert.deepEqual(movedMarks['drive:archive/source/video.mp4'].flags, [{ frame: 5, t: 0.2 }]);
 
   const movedIntoSelf = await fetch(`${handle.url}/api/move`, {
     method: 'POST',
@@ -431,10 +431,10 @@ test('本地模式只开放拖入的文件夹，并能读出分辨率/帧率/色
   const moved = await fetch(`${handle.url}/api/move`, {
     method: 'POST',
     headers: writeHeaders,
-    body: JSON.stringify({ remote: opened.remote, from: 'shot01.mov', to: '不合格/shot01.mov' })
+    body: JSON.stringify({ remote: opened.remote, from: 'shot01.mov', to: 'archive/shot01.mov' })
   });
   assert.equal(moved.status, 200);
-  assert.ok(fs.existsSync(path.join(dir, '不合格', 'shot01.mov')));
+  assert.ok(fs.existsSync(path.join(dir, 'archive', 'shot01.mov')));
 
   await handle.close();
 });
@@ -471,29 +471,25 @@ test('媒体信息解析覆盖真实 ffmpeg 输出的几种写法', () => {
   assert.equal(playableInChromium('hevc'), null);
 });
 
-test('穿帮点与合格状态互不覆盖，并随重命名一起迁移', async () => {
+test('穿帮点的写入、排序、清洗与清空', async () => {
   const { options } = fixture();
   const handle = await createVideoCheckerServer(options);
   const headers = { 'X-Video-Checker-Token': 'test-token', Host: new URL(handle.url).host, Origin: handle.url, 'Content-Type': 'application/json' };
   const post = body => fetch(`${handle.url}/api/marks`, { method: 'POST', headers, body: JSON.stringify(body) });
   const read = async () => (await fetch(`${handle.url}/api/marks`, { headers })).json();
 
-  // 只写 flags，不该产生 status
   await post({ key: 'drive:a.mp4', flags: [{ frame: 11, t: 0.48 }, { frame: 3, t: 0.14 }] });
   let marks = await read();
-  assert.equal(marks['drive:a.mp4'].status, undefined);
   assert.deepEqual(marks['drive:a.mp4'].flags, [{ frame: 3, t: 0.14 }, { frame: 11, t: 0.48 }], '应按帧号排序');
 
-  // 再写 status，flags 必须保住
-  await post({ key: 'drive:a.mp4', status: 'bad' });
+  // 不传 flags 时保持原样
+  await post({ key: 'drive:a.mp4' });
   marks = await read();
-  assert.equal(marks['drive:a.mp4'].status, 'bad');
-  assert.equal(marks['drive:a.mp4'].flags.length, 2, 'status 写入不能冲掉穿帮点');
+  assert.equal(marks['drive:a.mp4'].flags.length, 2, '没传 flags 不该冲掉已记的穿帮点');
 
-  // 反过来写 flags，status 也要保住
+  // 覆盖写入
   await post({ key: 'drive:a.mp4', flags: [{ frame: 3, t: 0.14 }] });
   marks = await read();
-  assert.equal(marks['drive:a.mp4'].status, 'bad');
   assert.equal(marks['drive:a.mp4'].flags.length, 1);
 
   // 非法输入被清洗掉；去重保留一条

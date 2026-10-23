@@ -593,7 +593,7 @@ async function createVideoCheckerServer(options = {}) {
   }
 
   function readSettings() {
-    return readJson(settingsFile, { remote: '', sortMode: 'name', subdir: '不合格', ramCacheGb: 0, ramMaxVideoGb: 0, holdSeekRate: 4, playbackRate: 1 });
+    return readJson(settingsFile, { remote: '', sortMode: 'name', ramCacheGb: 0, ramMaxVideoGb: 0, holdSeekRate: 4, playbackRate: 1 });
   }
 
   function writeSettings(settings) {
@@ -1209,7 +1209,6 @@ async function createVideoCheckerServer(options = {}) {
         const next = { ...current };
         if (typeof body.remote === 'string') next.remote = body.remote;
         if (['name', 'new', 'old'].includes(body.sortMode)) next.sortMode = body.sortMode;
-        if (typeof body.subdir === 'string' && body.subdir.trim()) next.subdir = body.subdir.trim();
         if (body.ramCacheGb === 0 || (Number.isFinite(Number(body.ramCacheGb)) && Number(body.ramCacheGb) >= 1)) {
           next.ramCacheGb = Number(body.ramCacheGb);
         }
@@ -1422,16 +1421,9 @@ async function createVideoCheckerServer(options = {}) {
         const body = await readBody(req);
         const marks = readMarks();
         const prev = marks[body.key] || {};
-        // status 和 flags 互不覆盖：只传其中一个时，另一个保持原样
-        const status = body.status === undefined ? prev.status : body.status;
         const flags = body.flags === undefined ? (prev.flags || []) : sanitizeFlags(body.flags);
-        if (!status && !flags.length) delete marks[body.key];
-        else {
-          const entry = { time: new Date().toISOString() };
-          if (status) entry.status = status;
-          if (flags.length) entry.flags = flags;
-          marks[body.key] = entry;
-        }
+        if (!flags.length) delete marks[body.key];
+        else marks[body.key] = { time: new Date().toISOString(), flags };
         writeMarks(marks);
         return json(res, 200, { ok: true });
       }

@@ -87,6 +87,13 @@ test('扫描结论区分硬接跳变和持续抖动', () => {
   assert.equal(jumpResult.peak.frame, 108);
   assert.match(jumpResult.text, /缺帧硬接/);
 
+  // 单帧 1.8 倍不算毛病：实测干净素材的峰值就有 1.8 倍，报了就是狼来了
+  const mildPeak = steady.map(item => ({ ...item }));
+  mildPeak[5].mean = 3.8;
+  const mild = scanVerdict(mildPeak);
+  assert.equal(mild.kind, 'ok', '1.8 倍上下应判成正常');
+  assert.match(mild.text, /正常运动范围/);
+
   // 隔帧闪烁：每帧都在抖，相邻帧差异反而大于隔一帧（实测正常运动 0.56、闪烁 3.0）
   const flicker = Array.from({ length: 20 }, (_, i) => ({ frame: 200 + i, mean: 4.8, mean2: 1.6 }));
   const flickerResult = scanVerdict(flicker);

@@ -43,13 +43,11 @@
   .entry:hover .actions { display: flex; }
   .entry .actions span { cursor: pointer; opacity: .65; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
   .entry .actions span:hover { opacity: 1; background: #3a3f48; }
-  .entry.badrow .name { color: var(--bad); text-decoration: line-through; opacity: .85; }
-  .badge.ok { background: var(--ok); } .badge.bad { background: var(--bad); }
+  .badge.bad { background: var(--bad); }
   #stats { padding: 8px 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--dim); }
   #cfg { padding: 8px 12px; border-top: 1px solid var(--border); font-size: 12px; display: grid; gap: 6px; }
   #cfg .cfg-row { display: flex; align-items: center; gap: 6px; }
   #cfg input { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 8px; font-size: 12px; }
-  #subdir { flex: 1; min-width: 0; }
   #cfg .ram-row { color: var(--dim); justify-content: space-between; }
   #cfg .ram-row label { display: flex; align-items: center; gap: 4px; }
   #cfg .ram-row input { width: 58px; }
@@ -68,10 +66,7 @@
   body.public-mode #copy-result-btn,
   body.public-mode #sort-bar,
   body.public-mode #batch-bar { display: none; }
-  body.public-mode #cfg .cfg-row:first-child { display: none; }
-  body.public-mode #player-wrap .ov-nav,
-  body.public-mode #player-wrap #ov-marks,
-  body.public-mode #folder-done-btn { display: none; }
+  body.public-mode #player-wrap .ov-nav { display: none; }
   body.public-preview-mode #seek-area,
   body.public-preview-mode #play-btn,
   body.public-preview-mode #speed,
@@ -86,18 +81,7 @@
   #next-btn { right: 0; }
   #prev-btn:hover { opacity: 1; background: linear-gradient(to right, rgba(0,0,0,.55), transparent); }
   #next-btn:hover { opacity: 1; background: linear-gradient(to left, rgba(0,0,0,.55), transparent); }
-  #ov-marks { position: absolute; left: 50%; transform: translateX(-50%); bottom: 20px;
-    display: none; gap: 16px; z-index: 5; opacity: .85; }
-  #ov-marks:hover { opacity: 1; }
-  /* 文件夹全部检查完时，画面中央的大按钮 */
-  #folder-done-btn { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-    display: none; z-index: 6; font-size: 17px; padding: 16px 32px; border-radius: 12px;
-    background: var(--ok); border-color: var(--ok); box-shadow: 0 4px 20px rgba(0,0,0,.6); }
-  #ov-marks:hover { opacity: 1; }
-  #ov-marks button { padding: 10px 28px; font-size: 15px; border-radius: 10px; white-space: nowrap;
-    box-shadow: 0 2px 12px rgba(0,0,0,.55); backdrop-filter: blur(4px); }
   #player-wrap.has-video .ov-nav { display: block; }
-  #player-wrap.has-video #ov-marks { display: flex; }
   #placeholder { color: var(--dim); text-align: center; line-height: 2.2; }
   kbd { background: #2c3038; border: 1px solid #444; border-radius: 4px; padding: 1px 7px; font-size: 12px; font-family: inherit; }
 
@@ -179,10 +163,7 @@
   #load-state.ready { color: var(--ok); }
   button { background: #2c3038; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
   button:hover { background: #363b44; }
-  button.ok { background: var(--ok); border-color: var(--ok); }
-  button.bad { background: var(--bad); border-color: var(--bad); }
   #toast { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); max-width: min(640px, calc(100% - 32px)); background: #2c3038; border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; display: none; align-items: center; gap: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.5); z-index: 200; }
-  #toast button { padding: 3px 12px; }
   [hidden] { display: none !important; }
   .modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.72); }
   .modal-card { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 16px 50px rgba(0,0,0,.6); }
