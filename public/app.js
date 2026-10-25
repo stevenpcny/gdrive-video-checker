@@ -1968,6 +1968,8 @@ let cmpWipeDrag = false;
 let cmpName = '';
 let cmpRaf = 0;
 let cmpAligning = false; // 自动对齐自己在挪 B，暂停跟随要让开
+let cmpLock = false;      // 同帧慢放开关
+let lockRunning = false;  // 同帧慢放正在逐帧推进
 
 const cmpTimeFor = () => Math.max(0, video.currentTime + cmpOffset * frameDur);
 
@@ -2086,6 +2088,8 @@ function drawCompare() {
   const h = cmpCanvas.height;
   cmpCtx.clearRect(0, 0, w, h);
   if (!videoB.videoWidth) return;
+  // 同帧慢放：A 也画到画布上，否则底下的 <video> 会比 B 先换帧
+  if (lockRunning) cmpCtx.drawImage(video, 0, 0, w, h);
   if (cmpMode === 'toggle') {
     if (cmpShowB) {
       cmpCtx.drawImage(videoB, 0, 0, w, h);
@@ -2157,7 +2161,8 @@ function startCompareLoop() {
   if (cmpRaf) cancelAnimationFrame(cmpRaf);
   const tick = () => {
     if (!cmpOn) return;
-    if (videoB.getAttribute('src')) {
+    // 同帧慢放时只在两边都落定后由慢放循环画，避免画到一新一旧
+    if (videoB.getAttribute('src') && !lockRunning) {
       if (!video.paused) syncCompare();
       drawCompare();
     }
@@ -2231,7 +2236,64 @@ async function autoAlign() {
 }
 
 // 播放时 B 靠循环跟随，循环只在 A 播放时同步；A 一停必须显式让 B 停到同一帧，否则 B 会继续播
-video.addEventListener('pause', () => { if (cmpOn && !cmpAligning) syncCompare(); });
+video.addEventListener('pause', () => { if (cmpOn && !cmpAligning && !lockRunning) syncCompare(); });
+
+// ---------- 同帧慢放：每一步两边都跳到位了再一起显示，保证每帧成对 ----------
+function seekEl(el, time) {
+  return new Promise(resolve => {
+    const done = () => { el.removeEventListener('seeked', done); resolve(); };
+    el.addEventListener('seeked', done);
+    el.currentTime = time;
+    setTimeout(done, 1500);
+  });
+}
+
+// 原生播放会让两边各走各的，开着同帧慢放时把「播放」改成启动/停止慢放
+video.addEventListener('play', () => {
+  if (!cmpOn || !cmpLock || !videoB.videoWidth) return;
+  video.pause();
+  if (lockRunning) lockRunning = false;
+  else runLockedPlayback();
+});
+
+async function runLockedPlayback() {
+  lockRunning = true;
+  const last = Math.round(video.duration / frameDur) - 1;
+  let steps = 0;
+  const started = performance.now();
+  while (lockRunning && cmpOn && cmpLock) {
+    const frame = targetFrame() + 1; // 每步重读，拖进度条后从新位置接着放
+    if (frame > last) break;
+    const stepStart = performance.now();
+    const tA = (frame + 0.5) * frameDur;
+    const tB = Math.min(videoB.duration - 0.001, Math.max(0, tA + cmpOffset * frameDur));
+    await Promise.all([seekEl(video, tA), seekEl(videoB, tB)]);
+    if (!lockRunning) break;
+    drawCompare();
+    $('play-btn').textContent = '⏸';
+    steps++;
+    // 小片解得比原速还快时，压回原速
+    const minStep = (frameDur / video.playbackRate) * 1000;
+    const spent = performance.now() - stepStart;
+    if (spent < minStep) await new Promise(resolve => setTimeout(resolve, minStep - spent));
+    if (steps % 12 === 0) {
+      const fps = steps / ((performance.now() - started) / 1000);
+      $('cmp-lock-rate').textContent = `${fps.toFixed(1)} 帧/秒（原速 ${Math.round(1 / frameDur)}）`;
+    }
+  }
+  lockRunning = false;
+  $('play-btn').textContent = '▶';
+  $('cmp-lock-rate').textContent = '';
+  drawCompare();
+}
+
+$('cmp-lock').onclick = () => {
+  cmpLock = !cmpLock;
+  $('cmp-lock').classList.toggle('on', cmpLock);
+  if (!cmpLock) lockRunning = false;
+  else if (!video.paused) video.pause(); // 正在原生播放就先停下，再按播放进入慢放
+  toast(cmpLock ? '同帧慢放已开：按空格或 ▶ 开始，两边每一帧都对上' : '已切回正常播放');
+};
 
 $('cmp-src').onchange = e => { if (e.target.value) loadCompareSource(Number(e.target.value)); };
 $('cmp-close-btn').onclick = closeCompare;
