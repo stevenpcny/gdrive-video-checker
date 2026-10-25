@@ -1365,7 +1365,8 @@ $('play-btn').onclick = () => video.paused ? video.play() : video.pause();
 $('mute-btn').onclick = () => { video.muted = !video.muted; $('mute-btn').textContent = video.muted ? '🔇' : '🔊'; };
 $('next-btn').onclick = next;
 $('prev-btn').onclick = prev;
-video.addEventListener('ended', next);
+// A/B 对比时播完停在最后一帧：跳到下一个会把 B 那条片换成 A，变成自己比自己
+video.addEventListener('ended', () => { if (!cmpOn) next(); });
 
 // ---------- 账号切换 / 导入 ----------
 let oauthFlow = null;
@@ -1966,6 +1967,7 @@ let cmpAlpha = 0.5;   // 叠加模式下 A 的不透明度
 let cmpWipeDrag = false;
 let cmpName = '';
 let cmpRaf = 0;
+let cmpAligning = false; // 自动对齐自己在挪 B，暂停跟随要让开
 
 const cmpTimeFor = () => Math.max(0, video.currentTime + cmpOffset * frameDur);
 
@@ -2065,8 +2067,15 @@ function syncCompare() {
       setTimeout(done, 1500);
     });
   }
-  videoB.playbackRate = video.playbackRate;
-  if (Math.abs(videoB.currentTime - target) > frameDur * 1.5) videoB.currentTime = target;
+  // 小偏差靠微调速度慢慢追上（硬 seek 会让 B 顿一下），偏得多才直接跳
+  const drift = videoB.currentTime - target;
+  if (Math.abs(drift) > frameDur * 4) {
+    videoB.currentTime = target;
+    videoB.playbackRate = video.playbackRate;
+  } else {
+    const nudge = Math.max(-0.1, Math.min(0.1, -drift / 0.5));
+    videoB.playbackRate = video.playbackRate * (1 + nudge);
+  }
   if (videoB.paused) videoB.play().catch(() => {});
   return Promise.resolve();
 }
@@ -2161,6 +2170,7 @@ function startCompareLoop() {
 async function autoAlign() {
   if (!videoB.videoWidth) return toast('先选一条对照片');
   const wasPaused = video.paused;
+  cmpAligning = true;
   video.pause();
   videoB.pause();
   cmpSetStatus('正在对齐…');
@@ -2195,7 +2205,8 @@ async function autoAlign() {
   }
   const scores = [...totals.entries()].map(([offset, bucket]) => ({ offset, diff: bucket.sum / bucket.used }));
   const picked = INSPECT.pickBestOffset(scores);
-  if (!scores.length) return cmpSetStatus('<span class="hit">对不了：取不到画面</span>');
+  if (!scores.length) { cmpAligning = false; return cmpSetStatus('<span class="hit">对不了：取不到画面</span>'); }
+  cmpAligning = false;
   cmpOffset = picked.offset;
   $('cmp-offset').textContent = cmpOffset + ' 帧';
   await syncCompare();
@@ -2218,6 +2229,9 @@ async function autoAlign() {
   describeCompare(lines.join('\n'));
   if (!wasPaused) video.play().catch(() => {});
 }
+
+// 播放时 B 靠循环跟随，循环只在 A 播放时同步；A 一停必须显式让 B 停到同一帧，否则 B 会继续播
+video.addEventListener('pause', () => { if (cmpOn && !cmpAligning) syncCompare(); });
 
 $('cmp-src').onchange = e => { if (e.target.value) loadCompareSource(Number(e.target.value)); };
 $('cmp-close-btn').onclick = closeCompare;
