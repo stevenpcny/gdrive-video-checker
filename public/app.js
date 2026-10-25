@@ -675,7 +675,11 @@ video.addEventListener('loadedmetadata', () => {
   layoutOverlays();
   fitWindowToVideo(++fitWindowSeq);
 });
-video.addEventListener('click', () => video.paused ? video.play() : video.pause());
+video.addEventListener('click', () => {
+  // 拉幕时按下/拖动是在拖分界线，不能顺带切换播放（播放用空格）
+  if (cmpOn && cmpMode === 'wipe') return;
+  video.paused ? video.play() : video.pause();
+});
 window.addEventListener('resize', () => { updateNavHitAreas(); layoutOverlays(); });
 
 // ---------- 重命名 / 删除 / 上传 ----------
@@ -1957,6 +1961,7 @@ let cmpMode = 'toggle';
 let cmpOffset = 0;        // 以 A 的帧为单位
 let cmpShowB = false;
 let cmpWipe = 0.5;
+let cmpAlpha = 0.5;   // 叠加模式下 A 的不透明度
 let cmpWipeDrag = false;
 let cmpName = '';
 let cmpRaf = 0;
@@ -2092,8 +2097,27 @@ function drawCompare() {
     cmpCtx.moveTo(split, 0);
     cmpCtx.lineTo(split, h);
     cmpCtx.stroke();
+    // 分界线中间的拖动把手
+    cmpCtx.fillStyle = '#ffb84d';
+    cmpCtx.beginPath();
+    cmpCtx.arc(split, h / 2, 9, 0, Math.PI * 2);
+    cmpCtx.fill();
+    cmpCtx.fillStyle = '#202124';
+    cmpCtx.beginPath();
+    cmpCtx.moveTo(split - 6, h / 2); cmpCtx.lineTo(split - 2, h / 2 - 4); cmpCtx.lineTo(split - 2, h / 2 + 4);
+    cmpCtx.moveTo(split + 6, h / 2); cmpCtx.lineTo(split + 2, h / 2 - 4); cmpCtx.lineTo(split + 2, h / 2 + 4);
+    cmpCtx.fill();
     badge('成片 A', 0);
     badge('原片 B', split + 6);
+    return;
+  }
+  if (cmpMode === 'overlay') {
+    // 画布盖在 A 上：先铺满 B，再按不透明度把 A 叠回来
+    cmpCtx.drawImage(videoB, 0, 0, w, h);
+    cmpCtx.globalAlpha = cmpAlpha;
+    cmpCtx.drawImage(video, 0, 0, w, h);
+    cmpCtx.globalAlpha = 1;
+    badge(`A ${Math.round(cmpAlpha * 100)}% / B`, 0);
     return;
   }
   // 差异图：两片相减放大，补丁范围会整块亮起来
@@ -2210,12 +2234,13 @@ function setCompareMode(mode) {
     button.classList.toggle('on', button.dataset.mode === mode);
   });
   document.body.classList.toggle('cmp-wipe', mode === 'wipe');
+  $('cmp-overlay-row').hidden = mode !== 'overlay';
   drawCompare();
 }
 
 function cycleCompareMode() {
   if (!cmpOn) return;
-  const modes = ['toggle', 'wipe', 'diff'];
+  const modes = ['toggle', 'wipe', 'overlay', 'diff'];
   setCompareMode(modes[(modes.indexOf(cmpMode) + 1) % modes.length]);
 }
 
@@ -2233,6 +2258,12 @@ $('player-wrap').addEventListener('pointerdown', e => {
 });
 $('player-wrap').addEventListener('pointermove', e => { if (cmpWipeDrag) moveWipe(e); });
 document.addEventListener('pointerup', () => { cmpWipeDrag = false; });
+
+$('cmp-alpha').oninput = e => {
+  cmpAlpha = Number(e.target.value) / 100;
+  $('cmp-alpha-val').textContent = e.target.value + '%';
+  drawCompare();
+};
 
 function moveWipe(e) {
   const rect = video.getBoundingClientRect();

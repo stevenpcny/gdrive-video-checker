@@ -125,6 +125,8 @@
   #cmp-status b { color: var(--text); }
   #cmp-status .hit { color: var(--bad); }
   body.cmp-wipe #player-wrap { cursor: ew-resize; }
+  #cmp-alpha { flex: 1; min-width: 80px; }
+  #cmp-alpha-val { color: var(--text); align-self: center; font-variant-numeric: tabular-nums; min-width: 36px; text-align: right; }
 
   /* 穿帮点 / 区间循环 */
   /* 覆盖在进度条轨道上，所以放在 #seekbar 里而不是会裁剪的 #seek-track 里 */
