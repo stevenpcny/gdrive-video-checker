@@ -4,6 +4,7 @@ const SPEEDS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 let frameDur = 1 / 30;   // 探测到真实帧率前的兜底值
 let mediaInfo = null;    // 当前视频的 {width,height,fps,bitDepth,codec,...}
 let mediaSeq = 0;        // 探测信息自己一套序号: startFullLoad 会再推进 loadSeq
+let mediaInfoReady = Promise.resolve(); // 当前视频帧率探测完成；自动对齐要用真实帧率
 let decodeFailed = false;
 let loopIn = null;       // 区间首帧
 let loopOut = null;      // 区间尾帧(含)
@@ -311,7 +312,7 @@ function play(i) {
   clearLoop();
   resetInspectTools();
   video.src = streamUrl(curRemote, pathOf(v));
-  loadMediaInfo(v, mediaSeq);
+  mediaInfoReady = loadMediaInfo(v, mediaSeq);
   renderFlags();
   requestAnimationFrame(updateNavHitAreas);
   video.play().catch(() => {});
@@ -2223,6 +2224,34 @@ $('cmp-close-btn').onclick = closeCompare;
 $('cmp-off-minus').onclick = async () => { cmpOffset--; $('cmp-offset').textContent = cmpOffset + ' 帧'; await syncCompare(); drawCompare(); };
 $('cmp-off-plus').onclick = async () => { cmpOffset++; $('cmp-offset').textContent = cmpOffset + ' 帧'; await syncCompare(); drawCompare(); };
 $('cmp-auto').onclick = autoAlign;
+$('cmp-swap').onclick = () => {
+  const b = Number($('cmp-src').value);
+  if (!$('cmp-src').value || !videos[b]) return toast('先选一条对照片');
+  openAB(b, curIdx);
+};
+
+function videoLoaded() {
+  if (video.readyState >= 2) return Promise.resolve();
+  return new Promise(resolve => {
+    const done = () => { video.removeEventListener('loadeddata', done); resolve(); };
+    video.addEventListener('loadeddata', done);
+    setTimeout(done, 8000);
+  });
+}
+
+// 指定两条片直接开 A/B：拖入两个文件，或勾选两个后右键
+async function openAB(aIndex, bIndex) {
+  play(aIndex);
+  video.pause();
+  await Promise.all([mediaInfoReady, videoLoaded()]);
+  if (!video.videoWidth) return toast('成片载不进来，可能本机解不了这个编码');
+  await openCompare();
+  cmpOffset = 0;
+  $('cmp-offset').textContent = '0 帧';
+  $('cmp-src').value = String(bIndex);
+  await loadCompareSource(bIndex);
+  if (videoB.videoWidth) await autoAlign();
+}
 
 document.querySelectorAll('.cmp-modes button').forEach(button => {
   button.onclick = () => setCompareMode(button.dataset.mode);
@@ -2346,19 +2375,54 @@ function clearLoop() {
   renderLoop();
 }
 
+// ---------- 列表右键：勾选两个视频做 A/B ----------
+const ctxMenu = $('ctx-menu');
+
+function closeCtxMenu() { ctxMenu.hidden = true; }
+
+$('list').addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const picked = selectedBatchItems()
+    .filter(item => !item.isDir)
+    .map(item => videos.findIndex(v => v.Name === item.name))
+    .filter(index => index >= 0)
+    .sort((a, b) => a - b);
+  ctxMenu.replaceChildren();
+  const addItem = (label, action) => {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.disabled = !action;
+    if (action) button.onclick = () => { closeCtxMenu(); action(); };
+    ctxMenu.appendChild(button);
+  };
+  if (picked.length === 2) {
+    const [a, b] = picked;
+    addItem(`A/B 对比：A=${videos[a].Name}，B=${videos[b].Name}`, () => openAB(a, b));
+    addItem(`对调后对比：A=${videos[b].Name}，B=${videos[a].Name}`, () => openAB(b, a));
+  } else {
+    addItem(`勾选两个视频后可做 A/B 对比（已勾选 ${picked.length} 个）`, null);
+  }
+  ctxMenu.hidden = false;
+  ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - ctxMenu.offsetWidth - 8) + 'px';
+  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - ctxMenu.offsetHeight - 8) + 'px';
+});
+document.addEventListener('pointerdown', e => { if (!ctxMenu.contains(e.target)) closeCtxMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtxMenu(); });
+$('list').addEventListener('scroll', closeCtxMenu);
+
 // ---------- 本地视频: 拖进来或自己选 ----------
 async function openLocalPaths(paths) {
   const list = (paths || []).filter(Boolean);
   if (!list.length) return;
   try {
     const result = await api('/api/local/open', { method: 'POST', body: JSON.stringify({ paths: list }) });
-    await enterLocalMode(result);
+    await enterLocalMode(result, list.length);
   } catch (error) {
     toast('打开本地视频失败: ' + error.message);
   }
 }
 
-async function enterLocalMode(result) {
+async function enterLocalMode(result, requested) {
   stopPlayback();
   localMode = true;
   localDir = result.dir;
@@ -2383,8 +2447,11 @@ async function enterLocalMode(result) {
   }
   const picked = (result.startNames || [])
     .map(name => videos.findIndex(v => v.Name === name))
-    .find(index => index >= 0);
-  play(picked === undefined ? 0 : picked);
+    .filter(index => index >= 0);
+  // 正好给了两个：第一个当成片 A，第二个当原片 B，直接对比
+  if (requested === 2 && picked.length === 2) return openAB(picked[0], picked[1]);
+  play(picked.length ? picked[0] : 0);
+  if (requested === 2) toast('A/B 对比需要同一个文件夹里的两个视频，这次只打开了第一个');
 }
 
 function exitLocalMode() {
