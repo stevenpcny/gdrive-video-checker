@@ -1,6 +1,6 @@
 const VIDEO_EXT = new Set(['mp4','mov','m4v','mkv','webm','avi','ts','mts','flv','wmv','3gp']);
 const MAX_DECODED_THUMBS = 600;
-const SPEEDS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+const SPEEDS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5];
 let frameDur = 1 / 30;   // 探测到真实帧率前的兜底值
 let mediaInfo = null;    // 当前视频的 {width,height,fps,bitDepth,codec,...}
 let mediaSeq = 0;        // 探测信息自己一套序号: startFullLoad 会再推进 loadSeq
@@ -1227,7 +1227,7 @@ function renderSpeed(rate) {
 }
 
 function setSpeed(rate, persist = true) {
-  const value = Math.min(4, Math.max(0.0625, Number(rate) || 1));
+  const value = Math.min(SPEEDS[SPEEDS.length - 1], Math.max(0.0625, Number(rate) || 1));
   // defaultPlaybackRate 一起设，否则换视频时 playbackRate 会被重置回 1。
   video.defaultPlaybackRate = value;
   video.playbackRate = value;
