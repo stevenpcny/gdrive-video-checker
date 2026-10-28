@@ -26,8 +26,9 @@ function createAppPaths(app) {
   const videoCacheDir = path.join(cacheDir, 'video');
   const thumbsDir = path.join(cacheDir, 'thumbs');
   const uploadsDir = path.join(cacheDir, 'uploads');
+  const youtubeDir = path.join(cacheDir, 'youtube');
 
-  for (const dir of [dataDir, cacheDir, logsDir, keysDir, rcloneDir, videoCacheDir, thumbsDir, uploadsDir]) {
+  for (const dir of [dataDir, cacheDir, logsDir, keysDir, rcloneDir, videoCacheDir, thumbsDir, uploadsDir, youtubeDir]) {
     ensurePrivateDir(dir);
   }
 
@@ -40,6 +41,7 @@ function createAppPaths(app) {
     videoCacheDir,
     thumbsDir,
     uploadsDir,
+    youtubeDir,
     marksFile: path.join(dataDir, 'marks.json'),
     settingsFile: path.join(dataDir, 'settings.json'),
     migrationFile: path.join(dataDir, 'migration.json'),

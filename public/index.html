@@ -16,8 +16,13 @@
     <input type="file" id="config-file" accept=".conf,text/plain" hidden>
   </div>
   <div id="link-bar">
-    <input id="link-paste-input" placeholder="粘贴 Drive 文件夹或视频链接">
-    <button id="link-paste-btn" title="公开视频可免登录播放；文件夹使用当前账号打开">打开链接</button>
+    <input id="link-paste-input" placeholder="粘贴 Drive 或 YouTube 链接">
+    <button id="link-paste-btn" title="Drive 公开视频可免登录播放，文件夹使用当前账号打开；YouTube 视频先下载到本机再检查">打开链接</button>
+  </div>
+  <div id="yt-bar" hidden>
+    <div id="yt-text"></div>
+    <div id="yt-progress"><div id="yt-progress-fill"></div></div>
+    <button id="yt-cancel-btn">取消</button>
   </div>
   <div id="crumbs"></div>
   <div id="sort-bar">排序
@@ -270,6 +275,7 @@
 
 <script src="/inspect.js"></script>
 <script src="/drive-link.js"></script>
+<script src="/youtube-link.js"></script>
 <script src="/batch-ops.js"></script>
 <script src="/app.js"></script>
 </body>

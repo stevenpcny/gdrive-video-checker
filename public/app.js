@@ -2733,9 +2733,83 @@ $('link-btn').onclick = async () => {
   }
 };
 
+// ---------- YouTube: 后台用 yt-dlp 下载到本机，下完按本地视频打开 ----------
+let youtubeJob = null; // { id, timer }
+
+function renderYoutube(status) {
+  const bar = $('yt-bar');
+  const text = $('yt-text');
+  bar.hidden = false;
+  text.classList.toggle('error', status.state === 'error');
+  $('yt-cancel-btn').textContent = status.state === 'running' ? '取消' : '关闭';
+  const pct = Number(status.percent) || 0;
+  $('yt-progress').hidden = status.state === 'error';
+  $('yt-progress-fill').style.width = pct + '%';
+  const name = status.title ? `「${status.title}」` : '';
+  if (status.state === 'running') {
+    // 1080p 以上画面和声音分开下：第 1 段是画面，第 2 段是声音，最后合并
+    const phase = status.phase > 1 ? '声音' : '画面';
+    text.textContent = pct >= 100 && status.phase > 1 ? `合并中…${name}` : `YouTube 下载${phase} ${pct.toFixed(0)}% ${name}`;
+  } else if (status.state === 'error') {
+    text.textContent = 'YouTube 下载失败：' + (status.error || '未知原因');
+  } else {
+    text.textContent = '下载完成 ' + name;
+  }
+  text.title = text.textContent;
+}
+
+function stopYoutubePolling() {
+  if (youtubeJob) clearTimeout(youtubeJob.timer);
+  youtubeJob = null;
+}
+
+async function pollYoutube(id) {
+  if (!youtubeJob || youtubeJob.id !== id) return;
+  let status;
+  try {
+    status = await api('/api/youtube/status?id=' + encodeURIComponent(id));
+  } catch (e) {
+    status = { id, state: 'error', error: e.message };
+  }
+  if (!youtubeJob || youtubeJob.id !== id) return;
+  renderYoutube(status);
+  if (status.state === 'running') {
+    youtubeJob.timer = setTimeout(() => pollYoutube(id), 700);
+    return;
+  }
+  stopYoutubePolling();
+  if (status.state === 'done' && status.local) {
+    $('yt-bar').hidden = true;
+    await enterLocalMode(status.local, 1);
+    toast('YouTube 视频已下载到本机，可以逐帧检查' + (status.title ? '：' + status.title : ''));
+  }
+}
+
+async function openYoutube(link) {
+  stopYoutubePolling();
+  try {
+    const status = await api('/api/youtube/download', { method: 'POST', body: JSON.stringify({ id: link.id }) });
+    $('link-paste-input').value = '';
+    youtubeJob = { id: link.id, timer: 0 };
+    renderYoutube(status);
+    pollYoutube(link.id);
+  } catch (e) {
+    renderYoutube({ state: 'error', error: e.message });
+  }
+}
+
+$('yt-cancel-btn').onclick = async () => {
+  const job = youtubeJob;
+  stopYoutubePolling();
+  $('yt-bar').hidden = true;
+  if (job) api('/api/youtube/cancel', { method: 'POST', body: JSON.stringify({ id: job.id }) }).catch(() => {});
+};
+
 $('link-paste-btn').onclick = () => {
+  const youtube = YoutubeLink.parse($('link-paste-input').value);
+  if (youtube) return openYoutube(youtube);
   const link = DriveLink.parse($('link-paste-input').value);
-  if (!link) return toast('看不出这是有效的 Google Drive 文件夹或视频链接');
+  if (!link) return toast('看不出这是有效的 Google Drive 或 YouTube 链接');
   if (link.type === 'file') return openPublicVideo(link);
   if (!curRemote) return toast('单个公开视频可免登录播放；打开整个文件夹仍需先添加账号');
   const folderId = link.id;

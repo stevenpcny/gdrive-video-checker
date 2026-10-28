@@ -76,6 +76,15 @@ ad-hoc 签名只能证明应用包构建后未被修改，不能证明开发者�
 
 文件夹行右侧的 `👥` 可管理链接查看/编辑权限和指定用户权限；`⇲` 可将文件夹移动到其他目录。公开编辑权限会允许拿到链接的人上传、修改和删除内容，程序会在应用前二次确认。
 
+## YouTube 视频
+
+在左侧「粘贴 Drive 或 YouTube 链接」框里粘贴 YouTube 链接（`youtube.com/watch`、`youtu.be`、Shorts、直播回放均可），点「打开链接」。应用会用 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 把视频下载到本机缓存，下载完成后按本地视频打开，逐帧、放大镜、差分、A/B 对比等功能全部可用。
+
+- 需要先安装 yt-dlp：在「终端」运行 `brew install yt-dlp`（会一并装上它需要的 deno）。YouTube 经常改版，下载失败时先运行 `brew upgrade yt-dlp`。
+- 画质选分辨率最高的版本，同分辨率优先 H.264；1080p 以上画面和声音分开下载，再用内置 ffmpeg 合并。
+- 下载的视频保存在 `~/Library/Caches/local.video-checker/youtube/`，同一视频不会重复下载；最多保留 20GB / 30 天。
+- 私享、会员或年龄限制的视频无法下载。请只下载你有权使用的视频，YouTube 服务条款原则上不允许第三方工具下载。
+
 ## 开发
 
 ```bash

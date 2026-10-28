@@ -13,6 +13,13 @@
   #link-bar { display: flex; gap: 6px; padding: 0 12px 8px; border-bottom: 1px solid var(--border); }
   #link-paste-input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 4px 8px; font-size: 12px; min-width: 0; }
   #link-bar button { padding: 4px 10px; font-size: 12px; white-space: nowrap; }
+  #yt-bar { display: grid; grid-template-columns: 1fr auto; gap: 4px 6px; align-items: center; padding: 0 12px 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  #yt-bar[hidden] { display: none; }
+  #yt-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted, #aaa); }
+  #yt-text.error { color: #ff6b6b; white-space: normal; }
+  #yt-progress { grid-column: 1; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  #yt-progress-fill { height: 100%; width: 0; background: #4a9eff; transition: width .3s; }
+  #yt-cancel-btn { grid-column: 2; grid-row: 1 / span 2; padding: 2px 8px; font-size: 12px; }
   #remote-bar button { padding: 4px 10px; font-size: 12px; white-space: nowrap; }
   #crumbs { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; word-break: break-all; }
   #crumbs a { color: var(--accent); cursor: pointer; text-decoration: none; }

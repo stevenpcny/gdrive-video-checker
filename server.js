@@ -16,12 +16,15 @@ const THUMB_FPS = 10;
 const THUMB_PROFILE = '10fps-240w-v2';
 const PUBLIC_THUMB_FPS = 2;
 const PUBLIC_THUMB_PROFILE = '2fps-240w-v1';
-const API_VERSION = 11;
+const API_VERSION = 12;
 const LIST_CACHE_TTL_MS = 30_000;
 const LOCAL_PREFIX = 'local-';
 const LOCAL_ROOT_MAX = 50;
 const PROBE_CACHE_MAX = 300;
 const MAX_FLAGS_PER_VIDEO = 500;
+const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
+// 从 Finder/Dock 启动时 PATH 里没有 Homebrew，yt-dlp 和它要用的 deno 都得自己补上。
+const EXTRA_BIN_DIRS = process.platform === 'win32' ? [] : ['/opt/homebrew/bin', '/usr/local/bin'];
 // ffmpeg 只打印两位小数的帧率，逐帧步进必须用精确值，否则 100 帧会偏掉 1 帧多。
 const COMMON_FPS = [24000 / 1001, 24, 25, 30000 / 1001, 30, 48, 50, 60000 / 1001, 60, 100, 120000 / 1001, 120];
 // 名字里不带「pNN」的高位深格式，只能查表。
@@ -231,8 +234,10 @@ async function createVideoCheckerServer(options = {}) {
   const cacheDir = options.cacheDir || path.join(os.tmpdir(), 'video-checker-cache');
   const thumbsDir = options.thumbsDir || path.join(os.tmpdir(), 'video-checker-thumbs');
   const uploadsDir = options.uploadsDir || path.join(os.tmpdir(), 'video-checker-uploads');
+  const youtubeDir = options.youtubeDir || path.join(os.tmpdir(), 'video-checker-youtube');
   const rclonePath = options.rclonePath || 'rclone';
   const ffmpegPath = options.ffmpegPath || 'ffmpeg';
+  const ytdlpPath = options.ytdlpPath || null;
   const rcloneConfigPath = options.rcloneConfigPath || null;
   const authToken = options.authToken || null;
   const migrationInfo = options.migrationInfo || null;
@@ -243,7 +248,7 @@ async function createVideoCheckerServer(options = {}) {
   const driveApiBaseUrl = options.driveApiBaseUrl || 'https://www.googleapis.com/drive/v3';
   const googleTokenUrl = options.googleTokenUrl || 'https://oauth2.googleapis.com/token';
 
-  for (const dir of [keysDir, cacheDir, thumbsDir, uploadsDir]) ensureDir(dir);
+  for (const dir of [keysDir, cacheDir, thumbsDir, uploadsDir, youtubeDir]) ensureDir(dir);
   // 新版完整视频只进 RAM；启动时清理旧版遗留的 SSD 视频缓存。
   for (const name of fs.readdirSync(cacheDir)) fs.rmSync(path.join(cacheDir, name), { recursive: true, force: true });
   for (const name of fs.readdirSync(uploadsDir)) {
@@ -252,6 +257,11 @@ async function createVideoCheckerServer(options = {}) {
     }
   }
   pruneCache(thumbsDir, 5 * 1024 ** 3, 30 * 24 * 60 * 60 * 1000);
+  // 上次没下完的 YouTube 分片直接丢掉；成品最多留 20GB / 30 天。
+  for (const name of fs.readdirSync(youtubeDir)) {
+    if (/\.(part|ytdl)$|\.part-Frag|\.f\d+\./.test(name)) fs.rmSync(path.join(youtubeDir, name), { recursive: true, force: true });
+  }
+  pruneCache(youtubeDir, 20 * 1024 ** 3, 30 * 24 * 60 * 60 * 1000);
   if (rcloneConfigPath) {
     ensureDir(path.dirname(rcloneConfigPath));
     if (!fs.existsSync(rcloneConfigPath)) fs.writeFileSync(rcloneConfigPath, '', { mode: 0o600 });
@@ -272,6 +282,7 @@ async function createVideoCheckerServer(options = {}) {
   const localRoots = new Map(); // rootId -> { dir, atime } 用户主动拖入的本地文件夹
   const probeCache = new Map(); // remote:path -> 媒体信息
   const probeJobs = new Map();
+  const youtubeJobs = new Map(); // videoId -> 下载状态
   const ramVideoCache = new Map(); // key -> { buffer, size, atime }
   let ramCacheBytes = 0;
   let expectedOrigin = null;
@@ -1143,6 +1154,118 @@ async function createVideoCheckerServer(options = {}) {
     return job;
   }
 
+  // ---------- YouTube: yt-dlp 下载到本地后按本地视频检查 ----------
+  function findYtdlp() {
+    const name = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+    const dirs = [...EXTRA_BIN_DIRS, ...String(process.env.PATH || '').split(path.delimiter).filter(Boolean)];
+    const candidates = [ytdlpPath, ...dirs.map(dir => path.join(dir, name))].filter(Boolean);
+    return candidates.find(file => { try { return fs.statSync(file).isFile(); } catch { return false; } }) || null;
+  }
+
+  function youtubeFile(id) {
+    const tag = `[${id}].`;
+    const name = fs.readdirSync(youtubeDir).find(file => file.includes(tag)
+      && LOCAL_VIDEO_MIME[path.extname(file).toLowerCase()]
+      && !/\.f\d+\.[^.]+$/.test(file));
+    return name ? path.join(youtubeDir, name) : null;
+  }
+
+  function youtubeLocal(file) {
+    const remote = registerLocalRoot(youtubeDir);
+    const root = localRootDir(remote);
+    return { remote, dir: root, entries: listLocalDirectory(root), startNames: [path.basename(file)] };
+  }
+
+  function youtubeStatus(id) {
+    const job = youtubeJobs.get(id);
+    if (job && job.state !== 'done') {
+      const { proc, ...rest } = job;
+      return rest;
+    }
+    const file = youtubeFile(id);
+    if (file) return { id, state: 'done', title: job?.title || '', percent: 100, local: youtubeLocal(file) };
+    return job ? { id, state: job.state } : { id, state: 'none' };
+  }
+
+  function startYoutubeDownload(id) {
+    const running = youtubeJobs.get(id);
+    if (running && running.state === 'running') return youtubeStatus(id);
+    if (youtubeFile(id)) return youtubeStatus(id);
+    const bin = findYtdlp();
+    if (!bin) {
+      throw new Error(process.platform === 'win32'
+        ? '没找到 yt-dlp：请安装 yt-dlp 并加入 PATH'
+        : '没找到 yt-dlp：请在「终端」运行 brew install yt-dlp 后重试');
+    }
+    const job = { id, state: 'running', phase: 1, percent: 0, title: '', error: '', proc: null };
+    youtubeJobs.set(id, job);
+    const args = [
+      // --print 默认会让 yt-dlp 只模拟不下载，必须配 --no-simulate
+      '--ignore-config', '--no-simulate', '--no-playlist', '--no-mtime', '--newline', '--progress',
+      // 先挑分辨率最高的；同分辨率优先 H.264/AAC，Mac 上能硬解，拖动逐帧更顺。
+      '-S', 'res,vcodec:h264,acodec:aac',
+      '--merge-output-format', 'mp4',
+      '--concurrent-fragments', '4',
+      '--progress-template', 'download:VCP %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s',
+      '--print', 'video:VCT %(title)s',
+      '-P', youtubeDir,
+      '-o', '%(title).80B [%(id)s].%(ext)s'
+    ];
+    if (path.isAbsolute(ffmpegPath)) args.push('--ffmpeg-location', ffmpegPath);
+    args.push('https://www.youtube.com/watch?v=' + id);
+    const env = { ...process.env, PATH: [...EXTRA_BIN_DIRS, process.env.PATH || ''].filter(Boolean).join(path.delimiter) };
+    const proc = trackChild(spawn(bin, args, { env, stdio: ['ignore', 'pipe', 'pipe'] }));
+    job.proc = proc;
+    let lastDownloaded = 0;
+    let stderr = '';
+    let pending = '';
+    proc.stdout.on('data', chunk => {
+      pending += chunk;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('VCT ')) { job.title = line.slice(4).trim(); continue; }
+        const m = /^VCP (\S+) (\S+) (\S+)/.exec(line.trim());
+        if (!m) continue;
+        const done = Number(m[1]);
+        const total = Number(m[2]) || Number(m[3]);
+        if (!Number.isFinite(done)) continue;
+        // 画面和声音分两次下载：已下字节数归零就是进入下一段
+        if (done < lastDownloaded) job.phase++;
+        lastDownloaded = done;
+        if (total > 0) job.percent = Math.min(100, Math.round(done / total * 1000) / 10);
+      }
+    });
+    proc.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
+    proc.on('error', error => {
+      job.state = 'error';
+      job.error = '无法运行 yt-dlp: ' + error.message;
+    });
+    proc.on('exit', code => {
+      job.proc = null;
+      if (job.state === 'cancelled') return;
+      if (code === 0 && youtubeFile(id)) {
+        job.state = 'done';
+        job.percent = 100;
+        log(`YouTube 下载完成: ${id} ${job.title}`);
+        return;
+      }
+      job.state = 'error';
+      const reason = (stderr.match(/ERROR: .*/g) || []).pop() || stderr.trim().split('\n').pop() || `退出码 ${code}`;
+      job.error = reason.replace(/^ERROR:\s*(\[[^\]]+\]\s*)?/, '').slice(0, 300);
+      log(`YouTube 下载失败: ${id} ${job.error}`);
+    });
+    return youtubeStatus(id);
+  }
+
+  function cancelYoutubeDownload(id) {
+    const job = youtubeJobs.get(id);
+    if (!job || job.state !== 'running') return youtubeStatus(id);
+    job.state = 'cancelled';
+    if (job.proc && !job.proc.killed) job.proc.kill('SIGTERM');
+    return youtubeStatus(id);
+  }
+
   function authorized(req, res) {
     if (req.headers.host !== `${host}:${actualPort}`) {
       json(res, 400, { error: 'invalid host' });
@@ -1193,6 +1316,15 @@ async function createVideoCheckerServer(options = {}) {
         if (!/^[A-Za-z0-9_-]{10,100}$/.test(fileId)) return json(res, 400, { error: '无效的 Google Drive 文件 ID' });
         if (resourceKey && !/^[A-Za-z0-9_-]{1,200}$/.test(resourceKey)) return json(res, 400, { error: '无效的 resource key' });
         return json(res, 200, await genPublicThumbs(fileId, resourceKey));
+      }
+
+      if (url.pathname.startsWith('/api/youtube/')) {
+        const body = req.method === 'POST' ? await readBody(req) : {};
+        const id = String(body.id || url.searchParams.get('id') || '');
+        if (!YOUTUBE_ID.test(id)) return json(res, 400, { error: '无效的 YouTube 视频 ID' });
+        if (url.pathname === '/api/youtube/download' && req.method === 'POST') return json(res, 200, startYoutubeDownload(id));
+        if (url.pathname === '/api/youtube/status' && req.method === 'GET') return json(res, 200, youtubeStatus(id));
+        if (url.pathname === '/api/youtube/cancel' && req.method === 'POST') return json(res, 200, cancelYoutubeDownload(id));
       }
 
       if (url.pathname === '/api/migration' && req.method === 'GET') {

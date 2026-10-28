@@ -84,6 +84,7 @@ if (command.includes('-vf')) {
       cacheDir: path.join(root, 'cache', 'video'),
       thumbsDir: path.join(root, 'cache', 'thumbs'),
       uploadsDir: path.join(root, 'cache', 'uploads'),
+      youtubeDir: path.join(root, 'cache', 'youtube'),
       rclonePath: tool,
       ffmpegPath: tool,
       rcloneConfigPath: path.join(root, 'data', 'rclone', 'rclone.conf'),
@@ -104,7 +105,7 @@ test('embedded server authenticates, persists settings, and closes', async t => 
 
   const headers = { 'X-Video-Checker-Token': 'test-token' };
   const health = await fetch(`${handle.url}/api/health`, { headers });
-  assert.deepEqual(await health.json(), { ok: true, app: 'video-checker', apiVersion: 11 });
+  assert.deepEqual(await health.json(), { ok: true, app: 'video-checker', apiVersion: 12 });
 
   const settings = await fetch(`${handle.url}/api/settings`, {
     method: 'POST',
@@ -506,4 +507,66 @@ test('穿帮点的写入、排序、清洗与清空', async () => {
   assert.equal(sanitizeFlags(Array.from({ length: 600 }, (_, i) => ({ frame: i, t: i }))).length, 500);
 
   await handle.close();
+});
+
+test('YouTube downloads run yt-dlp, report progress, and open as a local video', async t => {
+  const { root, options } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const ytdlp = path.join(root, 'fake-yt-dlp');
+  fs.writeFileSync(ytdlp, `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const args = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(path.join(root, 'yt-args.json'))}, JSON.stringify(args));
+const url = args[args.length - 1];
+const id = new URL(url).searchParams.get('v');
+if (id === 'privateVid1') { process.stderr.write('ERROR: [youtube] privateVid1: Private video\\n'); process.exit(1); }
+const dir = args[args.indexOf('-P') + 1];
+process.stdout.write('VCT 测试 视频\\n');
+process.stdout.write('VCP 50 100 NA\\n');
+setTimeout(() => {
+  process.stdout.write('VCP 100 100 NA\\n');
+  fs.writeFileSync(path.join(dir, '测试 视频 [' + id + '].mp4'), 'video');
+}, 50);
+`, { mode: 0o755 });
+  const handle = await createVideoCheckerServer({ ...options, ytdlpPath: ytdlp });
+  t.after(() => handle.close());
+  const headers = { 'X-Video-Checker-Token': 'test-token', Origin: handle.url };
+  const post = (route, body) => fetch(`${handle.url}${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
+
+  assert.equal((await post('/api/youtube/download', { id: '../../etc/pa' })).status, 400);
+
+  const started = await (await post('/api/youtube/download', { id: 'dQw4w9WgXcQ' })).json();
+  assert.equal(started.state, 'running');
+  let status;
+  for (let i = 0; i < 100; i++) {
+    status = await (await fetch(`${handle.url}/api/youtube/status?id=dQw4w9WgXcQ`, { headers })).json();
+    if (status.state !== 'running') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(status.state, 'done');
+  assert.equal(status.title, '测试 视频');
+  assert.match(status.local.remote, /^local-/);
+  assert.deepEqual(status.local.startNames, ['测试 视频 [dQw4w9WgXcQ].mp4']);
+  const args = JSON.parse(fs.readFileSync(path.join(root, 'yt-args.json'), 'utf8'));
+  assert.equal(args[args.length - 1], 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  assert.ok(args.includes('--no-playlist'));
+  assert.ok(args.includes('--no-simulate'));
+
+  const stream = await fetch(`${handle.url}/stream/${status.local.remote}/${encodeURIComponent(status.local.startNames[0])}`, { headers });
+  assert.equal(await stream.text(), 'video');
+
+  // 已下载过的直接复用，不再启动 yt-dlp
+  fs.rmSync(path.join(root, 'yt-args.json'));
+  assert.equal((await (await post('/api/youtube/download', { id: 'dQw4w9WgXcQ' })).json()).state, 'done');
+  assert.equal(fs.existsSync(path.join(root, 'yt-args.json')), false);
+
+  await post('/api/youtube/download', { id: 'privateVid1' });
+  for (let i = 0; i < 100; i++) {
+    status = await (await fetch(`${handle.url}/api/youtube/status?id=privateVid1`, { headers })).json();
+    if (status.state !== 'running') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(status.state, 'error');
+  assert.equal(status.error, 'privateVid1: Private video');
 });

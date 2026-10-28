@@ -37,6 +37,11 @@ function runtimeBinary(name) {
   return file;
 }
 
+// yt-dlp 不随包分发（YouTube 改版频繁，要跟着 Homebrew 更新）；vendor 里有就用，否则由服务端去 PATH/Homebrew 找。
+function optionalRuntimeBinary(name) {
+  try { return runtimeBinary(name); } catch { return undefined; }
+}
+
 function registerLocalPickerIpc() {
   ipcMain.handle('dialog:pick-local-videos', async event => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -82,6 +87,8 @@ async function createWindow() {
     cacheDir: paths.videoCacheDir,
     thumbsDir: paths.thumbsDir,
     uploadsDir: paths.uploadsDir,
+    youtubeDir: paths.youtubeDir,
+    ytdlpPath: optionalRuntimeBinary('yt-dlp'),
     rclonePath: runtimeBinary('rclone'),
     ffmpegPath: runtimeBinary('ffmpeg'),
     rcloneConfigPath: paths.rcloneConfigPath,
