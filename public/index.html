@@ -37,6 +37,7 @@
     <button id="batch-delete-btn" disabled>🗑 删除</button>
   </div>
   <div id="list"></div>
+  <div id="ctx-menu" hidden></div>
   <div id="flag-panel" hidden>
     <div class="flag-head">
       <span id="flag-title">穿帮点</span>
@@ -61,7 +62,13 @@
     <div class="insp-actions cmp-modes">
       <button data-mode="toggle" class="on" title="按 X 在 A/B 之间翻">切换</button>
       <button data-mode="wipe" title="拖动分界线左右对比">拉幕</button>
+      <button data-mode="overlay" title="成片半透明叠在原片上">叠加</button>
       <button data-mode="diff" title="两片相减并放大：补丁范围和多动的地方会亮起来">差异</button>
+    </div>
+    <div class="insp-actions" id="cmp-overlay-row" hidden>
+      <span class="cmp-label">A 不透明度</span>
+      <input type="range" id="cmp-alpha" min="0" max="100" value="50">
+      <span id="cmp-alpha-val">50%</span>
     </div>
     <div class="insp-actions">
       <span class="cmp-label">偏移</span>
@@ -69,6 +76,11 @@
       <span id="cmp-offset">0 帧</span>
       <button id="cmp-off-plus">+1</button>
       <button id="cmp-auto">自动对齐</button>
+      <button id="cmp-swap" title="成片和原片对调">A↔B 对调</button>
+    </div>
+    <div class="insp-actions">
+      <button id="cmp-lock" title="逐帧推进两边，每一帧都完全对上；速度比原速慢">同帧慢放</button>
+      <span id="cmp-lock-rate" class="cmp-label"></span>
     </div>
     <div id="cmp-status"></div>
   </div>
