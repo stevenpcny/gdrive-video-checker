@@ -1250,7 +1250,8 @@ const currentFrame = () => frameAt(video.currentTime);
 const targetFrame = () => frameAt(pendingSeek !== null ? pendingSeek : video.currentTime);
 
 function stepFrame(delta) {
-  const target = Math.max(0, currentFrame() + delta);
+  // 从排队中的目标帧往前走：连按 , / . 时上一次 seek 还没落地，用 currentTime 会丢步。
+  const target = Math.max(0, targetFrame() + delta);
   // 落在帧中心，避免精度误差把画面停在相邻帧上。
   chainSeek(Math.min(video.duration || Infinity, (target + 0.5) * frameDur));
 }
