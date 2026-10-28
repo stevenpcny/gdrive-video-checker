@@ -172,6 +172,8 @@
       out.seamStep = stepHits.length
         ? { kind: stepHits[0].kind, frames: stepHits.map(v => v.frame), text: stepHits[0].text }
         : { kind: stepVerdicts.length ? 'ok' : 'unknown', text: stepVerdicts.length ? '采样帧四条边都没有补丁引入的贯通硬边或切断' : '椭圆贴回区不做矩形硬边判据' };
+      // 校准用：采样帧里补丁引入的最强台阶
+      out.seamStep.maxRunRatio = Math.max(0, ...stepVerdicts.map(v => (v.worst ? v.worst.runRatio : 0)));
       if (stepHits.length >= Math.max(2, stepVerdicts.length * 0.3)) {
         add('native_and_magnified_edges', contentSev('fail'), `「${p.name}」${stepHits.length}/${stepVerdicts.length} 个采样帧有硬边：${stepHits[0].text}${hedge}`, { patch: p.name, frame: stepHits[0].frame, metric: 'seamRunRatio', value: stepHits[0].worst && stepHits[0].worst.runRatio });
       } else if (stepHits.length) {
