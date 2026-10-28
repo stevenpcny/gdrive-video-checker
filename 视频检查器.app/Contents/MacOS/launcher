@@ -5,7 +5,8 @@ export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 DIR="$HOME/谷歌云盘视频检查器"
 URL="http://127.0.0.1:5572"
 BOOT="$HOME/Library/Logs/video-checker-boot.log"
-API_VERSION=10
+# 从 server.js 读，避免两边各写一份数字：server 升版本时这里曾漏改，导致每次启动都判成版本不匹配
+API_VERSION=$(sed -n 's/^const API_VERSION = \([0-9]*\);.*/\1/p' "$DIR/server.js" 2>/dev/null)
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$BOOT"; }
 
@@ -41,13 +42,26 @@ if curl -s -o /dev/null --max-time 2 "$URL"; then
     open_browser; exit 0
   fi
   log "检测到旧版或不兼容的后台, 将自动重启"
+  # 按端口找占用者：pkill 按路径只认得绝对路径启动的 server.js，
+  # 用相对路径（如开发时 node server.js）起的进程会漏掉
+  stop_port_owner() { # $1 = 信号
+    local pids
+    pids=$(lsof -nP -t -iTCP:5572 -sTCP:LISTEN 2>/dev/null)
+    [ -n "$pids" ] || return 0
+    log "停止占用 5572 的进程 ($1): $(echo $pids)"
+    kill -"$1" $pids 2>/dev/null
+  }
+  wait_port_free() {
+    for _ in $(seq 1 20); do
+      curl -s -o /dev/null --max-time 1 "$URL" || return 0
+      sleep 0.2
+    done
+    return 1
+  }
   pkill -f "$DIR/server.js" 2>/dev/null
-  for _ in $(seq 1 20); do
-    curl -s -o /dev/null --max-time 1 "$URL" || break
-    sleep 0.2
-  done
-  curl -s -o /dev/null --max-time 1 "$URL" \
-    && fail "5572 端口上的旧服务无法停止，请重启 Mac 后再试"
+  stop_port_owner TERM
+  wait_port_free || { stop_port_owner KILL; wait_port_free; } \
+    || fail "5572 端口被占用且无法停止，请在「活动监视器」里结束占用该端口的进程后再试"
 fi
 
 # 依赖检查
