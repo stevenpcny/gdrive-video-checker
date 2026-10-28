@@ -118,6 +118,14 @@ test('embedded server authenticates, persists settings, and closes', async t => 
     remote: 'drive:', sortMode: 'new', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5
   });
 
+  const looped = await fetch(`${handle.url}/api/settings`, {
+    method: 'POST',
+    headers: { ...headers, Origin: handle.url },
+    body: JSON.stringify({ loopVideo: true })
+  });
+  assert.equal((await looped.json()).loopVideo, true);
+  assert.equal(JSON.parse(fs.readFileSync(options.settingsFile, 'utf8')).loopVideo, true);
+
   const imported = await fetch(`${handle.url}/api/remotes/import-config`, {
     method: 'POST',
     headers: { ...headers, Origin: handle.url },

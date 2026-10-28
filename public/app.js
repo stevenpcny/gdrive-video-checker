@@ -1335,6 +1335,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'j' || k === 'J') { e.preventDefault(); askJumpFrame(); }
   else if (k === 'i' || k === 'I') { e.preventDefault(); setLoopEdge('in'); }
   else if (k === 'o' || k === 'O') { e.preventDefault(); setLoopEdge('out'); }
+  else if ((k === 'l' || k === 'L') && e.shiftKey) { e.preventDefault(); setLoopVideo(!video.loop); }
   else if (k === 'l' || k === 'L') { e.preventDefault(); toggleLoop(); }
   else if (k === 'd' || k === 'D') { e.preventDefault(); toggleDiffView(); }
   else if (k === 'z' || k === 'Z') { e.preventDefault(); toggleZoom(); }
@@ -1370,6 +1371,17 @@ $('next-btn').onclick = next;
 $('prev-btn').onclick = prev;
 // A/B 对比时播完停在最后一帧：跳到下一个会把 B 那条片换成 A，变成自己比自己
 video.addEventListener('ended', () => { if (!cmpOn) next(); });
+
+// 整个视频循环：用原生 loop，播完直接回到开头，不会触发 ended 跳下一个。
+function setLoopVideo(on, save = true) {
+  video.loop = on;
+  $('loop-video-btn').classList.toggle('on', on);
+  if (save) {
+    saveSettings({ loopVideo: on }).catch(() => {});
+    toast(on ? '已开启循环播放：当前视频播完从头再来（Shift+L 关闭）' : '已关闭循环播放：播完自动跳下一个');
+  }
+}
+$('loop-video-btn').onclick = () => setLoopVideo(!video.loop);
 
 // ---------- 账号切换 / 导入 ----------
 let oauthFlow = null;
@@ -3014,6 +3026,7 @@ async function initialize() {
     $('ram-video-gb').value = settings.ramMaxVideoGb > 0 ? settings.ramMaxVideoGb : '';
     $('hold-seek-rate').value = String([0.5, 1, 2, 4, 8, 16].includes(Number(settings.holdSeekRate)) ? Number(settings.holdSeekRate) : 4);
     setSpeed(SPEEDS.includes(Number(settings.playbackRate)) ? Number(settings.playbackRate) : 1, false);
+    setLoopVideo(settings.loopVideo === true, false);
     await refreshRamStatus();
     if (await loadRemotes()) await loadDir('');
   } catch (error) {

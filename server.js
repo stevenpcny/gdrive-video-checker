@@ -1349,6 +1349,7 @@ async function createVideoCheckerServer(options = {}) {
         }
         if ([0.5, 1, 2, 4, 8, 16].includes(Number(body.holdSeekRate))) next.holdSeekRate = Number(body.holdSeekRate);
         if (Number(body.playbackRate) >= 0.0625 && Number(body.playbackRate) <= 4) next.playbackRate = Number(body.playbackRate);
+        if (typeof body.loopVideo === 'boolean') next.loopVideo = body.loopVideo;
         writeSettings(next);
         evictRamCache();
         return json(res, 200, next);

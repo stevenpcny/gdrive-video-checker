@@ -126,7 +126,7 @@
       <kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> 短按跳5秒·长按连续扫描　<kbd>Shift+←/→</kbd> 跳30秒　<kbd>,</kbd>/<kbd>.</kbd> 逐帧<br>
       <kbd>↑</kbd>/<kbd>↓</kbd> 上/下一个视频　<kbd>M</kbd> 静音<br>
       <kbd>Enter</kbd> 下一个　<kbd>P</kbd> 上一个　<kbd>[</kbd>/<kbd>]</kbd> 放慢/加快　拖动进度条可逐帧看画面<br>
-      <kbd>F</kbd> 记一个穿帮点　<kbd>J</kbd> 跳到指定帧　<kbd>I</kbd>/<kbd>O</kbd> 设区间首/尾帧　<kbd>L</kbd> 区间循环（未设区间时取当前帧±10）<br>
+      <kbd>F</kbd> 记一个穿帮点　<kbd>J</kbd> 跳到指定帧　<kbd>I</kbd>/<kbd>O</kbd> 设区间首/尾帧　<kbd>L</kbd> 区间循环（未设区间时取当前帧±10）　<kbd>Shift+L</kbd> 整个视频循环播放<br>
       <kbd>S</kbd> 扫描区间找跳变/闪烁　<kbd>D</kbd> 差分视图　<kbd>Z</kbd> 放大镜（滚轮调倍数）　<kbd>R</kbd> 框选补丁区比清晰度和色差<br>
       <kbd>C</kbd> 和原片 A/B 对比　<kbd>X</kbd> 在成片/原片之间翻　<kbd>V</kbd> 换对比方式（切换·拉幕·差异）<br><br>
       也可以把本机的视频或文件夹直接拖进这个窗口检查
@@ -171,6 +171,7 @@
     </label>
     <span id="speed">1.0x</span>
     <button id="mute-btn" title="M">🔊</button>
+    <button id="loop-video-btn" title="循环播放当前视频，播完从头再来，不跳下一个（Shift+L）">🔁 循环</button>
     <button id="prev-folder-btn" title="按当前排序跳到父文件夹里的上一个文件夹">◂ 上一个文件夹</button>
     <button id="next-folder-btn" title="按当前排序跳到父文件夹里的下一个文件夹">下一个文件夹 ▸</button>
     <button id="copy-result-btn" title="按视频编号从小到大，复制这组检查结果，可直接粘贴到表格一列">📋 复制检查结果</button>

@@ -120,6 +120,7 @@
   #inspect-text .hit { color: var(--bad); }
   .insp-actions { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
   .insp-actions button { padding: 2px 8px; font-size: 11px; }
+  #loop-video-btn.on { background: var(--accent); border-color: var(--accent); color: #10131a; }
   .insp-actions button.on { background: var(--accent); border-color: var(--accent); color: #10131a; }
 
   /* A/B 对比 */
