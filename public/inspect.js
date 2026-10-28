@@ -619,6 +619,312 @@
     return { kind: 'ok', base, peak, shaky, flickerRatio, localized: null, control: ctrl, text: `${label}帧间变化平稳，没有明显跳变或闪烁` };
   }
 
+  // ---------- 接缝颜色：CIELAB ΔE ----------
+  // flow-video-patch 的验收要求「沿贴回边缘取内侧(生成)和外侧(原片)几十像素宽的
+  // 同类区域比 LAB，并写明颜色转换、取样区域和 ΔE 算法」。这里统一用：
+  //   解码后的 8 位 RGB 按 sRGB(BT.709 原色, D65) 线性化 → XYZ → CIELAB，ΔE = CIE76。
+  // 这不是 OpenCV 的 8 位 LAB 编码距离，也不是 ΔE2000；数值只辅助定位，不是通用阈值。
+  const LINEAR = new Float64Array(256);
+  for (let i = 0; i < 256; i++) {
+    const c = i / 255;
+    LINEAR[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+  const labF = t => (t > 216 / 24389 ? Math.cbrt(t) : (24389 / 27 * t + 16) / 116);
+
+  function rgbToLab(r, g, b) {
+    const R = LINEAR[r | 0];
+    const G = LINEAR[g | 0];
+    const B = LINEAR[b | 0];
+    const x = (0.4124564 * R + 0.3575761 * G + 0.1804375 * B) / 0.95047;
+    const y = 0.2126729 * R + 0.7151522 * G + 0.0721750 * B;
+    const z = (0.0193339 * R + 0.1191920 * G + 0.9503041 * B) / 1.08883;
+    const fx = labF(x);
+    const fy = labF(y);
+    const fz = labF(z);
+    return { L: 116 * fy - 16, a: 500 * (fx - fy), b: 200 * (fy - fz) };
+  }
+
+  // 逐像素转 LAB 再平均（先平均 RGB 再转会被高光/暗部拉偏）
+  function meanLab(frame, rect) {
+    const { data, width, height } = frame;
+    const x0 = Math.max(0, Math.round(rect.x));
+    const y0 = Math.max(0, Math.round(rect.y));
+    const x1 = Math.min(width, Math.round(rect.x + rect.w));
+    const y1 = Math.min(height, Math.round(rect.y + rect.h));
+    let L = 0;
+    let A = 0;
+    let B = 0;
+    let n = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = (y * width + x) * 4;
+        const lab = rgbToLab(data[i], data[i + 1], data[i + 2]);
+        L += lab.L;
+        A += lab.a;
+        B += lab.b;
+        n++;
+      }
+    }
+    return n ? { L: L / n, a: A / n, b: B / n, n } : null;
+  }
+
+  const deltaE76 = (p, q) => Math.sqrt((p.L - q.L) ** 2 + (p.a - q.a) ** 2 + (p.b - q.b) ** 2);
+
+  // 逐条边比内外：上边常是发际/额头，下边常是下巴/脖子，不能混在一起平均。
+  // 内带要越过羽化带（那里只被改了一半，会低估差异），取 feather+near … feather+far；
+  // 外带取边外 near … far。near/far 按 4K 下 16/70 像素随画面高度缩放。
+  // ellipse 的贴回区只在包围盒四边中点贴边，所以只取每条边中间 40%。
+  function seamLab(frame, rect, options = {}) {
+    const { width, height } = frame;
+    const scale = Math.max(0.25, (options.frameHeight || height) / 2160);
+    const feather = Math.max(0, options.feather || 0);
+    const near = Math.max(2, Math.round(16 * scale));
+    let far = Math.max(near + 4, Math.round(70 * scale));
+    const maxInset = Math.floor(Math.min(rect.w, rect.h) / 2) - 1;
+    const innerStart = Math.min(maxInset - 2, Math.round(feather) + near);
+    const innerEnd = Math.min(maxInset, Math.round(feather) + far);
+    if (innerEnd - innerStart < 2) return { edges: {}, worst: null, near, far, unit: 'CIE76' };
+    far = Math.max(far, near + 2);
+    const along = options.shape === 'ellipse' ? 0.4 : 1;
+    const span = (start, len) => ({ s: start + len * (1 - along) / 2, l: len * along });
+    const hs = span(rect.x, rect.w);
+    const vs = span(rect.y, rect.h);
+    const bands = {
+      top: {
+        inner: { x: hs.s, y: rect.y + innerStart, w: hs.l, h: innerEnd - innerStart },
+        outer: { x: hs.s, y: rect.y - far, w: hs.l, h: far - near }
+      },
+      bottom: {
+        inner: { x: hs.s, y: rect.y + rect.h - innerEnd, w: hs.l, h: innerEnd - innerStart },
+        outer: { x: hs.s, y: rect.y + rect.h + near, w: hs.l, h: far - near }
+      },
+      left: {
+        inner: { x: rect.x + innerStart, y: vs.s, w: innerEnd - innerStart, h: vs.l },
+        outer: { x: rect.x - far, y: vs.s, w: far - near, h: vs.l }
+      },
+      right: {
+        inner: { x: rect.x + rect.w - innerEnd, y: vs.s, w: innerEnd - innerStart, h: vs.l },
+        outer: { x: rect.x + rect.w + near, y: vs.s, w: far - near, h: vs.l }
+      }
+    };
+    const inside = r => r.x >= 0 && r.y >= 0 && r.x + r.w <= width && r.y + r.h <= height && r.w >= 1 && r.h >= 1;
+    const edges = {};
+    let worst = null;
+    for (const [name, band] of Object.entries(bands)) {
+      if (!inside(band.inner) || !inside(band.outer)) { edges[name] = null; continue; }
+      const a = meanLab(frame, band.inner);
+      const b = meanLab(frame, band.outer);
+      if (!a || !b) { edges[name] = null; continue; }
+      const item = { dE: deltaE76(a, b), dL: a.L - b.L, da: a.a - b.a, db: a.b - b.b, inner: a, outer: b };
+      edges[name] = item;
+      if (!worst || item.dE > worst.dE) worst = { edge: name, ...item };
+    }
+    return { edges, worst, near, far, unit: 'CIE76', innerOffset: [innerStart, innerEnd] };
+  }
+
+  // 有原片时只算补丁「新引入」的接缝色差：成片的(内-外) 减去 原片同位置的(内-外)。
+  // 原片里边内外本来就不同（脸和头发、皮肤和衣领）是内容，不是补丁的问题。
+  function seamLabRelative(finished, source, rect, options = {}) {
+    const f = seamLab(finished, rect, options);
+    const s = seamLab(source, rect, options);
+    const edges = {};
+    let worst = null;
+    for (const name of ['top', 'bottom', 'left', 'right']) {
+      const a = f.edges[name];
+      const b = s.edges[name];
+      if (!a || !b) { edges[name] = null; continue; }
+      const dL = a.dL - b.dL;
+      const da = a.da - b.da;
+      const db = a.db - b.db;
+      const item = { dE: Math.sqrt(dL * dL + da * da + db * db), dL, da, db, raw: a.dE, original: b.dE };
+      edges[name] = item;
+      if (!worst || item.dE > worst.dE) worst = { edge: name, ...item };
+    }
+    return { edges, worst, near: f.near, far: f.far, unit: 'CIE76', relative: true, innerOffset: f.innerOffset };
+  }
+
+  // 接缝色差随时间：既看最大值，也看相邻采样之间有没有跳（颜色跳 = 时间不稳定）。
+  // 4 / 8 只是提示档（ΔE76≈2.3 是一般可察觉差），最终以画面为准。
+  function seamColorVerdict(series) {
+    const values = series.filter(item => item && item.worst);
+    if (!values.length) return { kind: 'unknown', text: '贴边或区域太小，量不到接缝颜色', max: null };
+    const max = values.reduce((a, b) => (b.worst.dE > a.worst.dE ? b : a));
+    let jump = null;
+    for (let i = 1; i < values.length; i++) {
+      for (const edge of ['top', 'bottom', 'left', 'right']) {
+        const p = values[i - 1].edges && values[i - 1].edges[edge];
+        const q = values[i].edges && values[i].edges[edge];
+        if (!p || !q) continue;
+        const d = Math.abs(q.dE - p.dE);
+        if (!jump || d > jump.d) jump = { d, edge, from: values[i - 1].frame, to: values[i].frame };
+      }
+    }
+    const name = { top: '上', bottom: '下', left: '左', right: '右' };
+    const w = max.worst;
+    const tint = `ΔL ${w.dL >= 0 ? '+' : ''}${w.dL.toFixed(1)} Δa ${w.da >= 0 ? '+' : ''}${w.da.toFixed(1)} Δb ${w.db >= 0 ? '+' : ''}${w.db.toFixed(1)}`;
+    const rel = values[0].relative;
+    const head = `${name[w.edge]}边${rel ? '补丁引入的' : ''}内外色差最大 ΔE76 ${w.dE.toFixed(1)}（第 ${max.frame + 1} 帧，${tint}${rel ? `；原片同位置本来差 ${w.original.toFixed(1)}` : ''}）`;
+    const jumpText = jump && jump.d >= 3 ? `；${name[jump.edge]}边色差在第 ${jump.from + 1}→${jump.to + 1} 帧之间跳了 ${jump.d.toFixed(1)}，颜色随时间不稳` : '';
+    const kind = w.dE >= 8 || (jump && jump.d >= 5) ? 'fail' : w.dE >= 4 || (jump && jump.d >= 3) ? 'warn' : 'ok';
+    const lead = kind === 'fail' ? '接缝色差明显：' : kind === 'warn' ? '接缝有轻微色差：' : '接缝颜色基本一致：';
+    return { kind, max: { frame: max.frame, ...w }, jump, text: lead + head + jumpText };
+  }
+
+  // ---------- 成片 vs 原片：遮罩外有没有被改动 ----------
+  // 未修区应只剩编码噪声。分块比 RGB 平均绝对差，先用全体分块的中位数当噪声基线，
+  // 再找明显高出基线的块——衣服被调色波及、旧轮廓、整幅偏色都会在这里冒出来。
+  // exclude 里的矩形（贴回区及其羽化外扩）不参与。两帧必须同尺寸、已对齐。
+  function regionChange(a, b, options = {}) {
+    if (a.width !== b.width || a.height !== b.height) throw new Error('两帧尺寸不同，没法逐像素比');
+    const { width, height } = a;
+    const block = options.block || Math.max(8, Math.round(Math.min(width, height) / 24));
+    const exclude = options.exclude || [];
+    const only = options.only || null;
+    const hits = (x, y, w, h, r) => x < r.x + r.w && x + w > r.x && y < r.y + r.h && y + h > r.y;
+    const blocks = [];
+    let sumR = 0;
+    let sumG = 0;
+    let sumB = 0;
+    let total = 0;
+    for (let by = 0; by < height; by += block) {
+      for (let bx = 0; bx < width; bx += block) {
+        const bw = Math.min(block, width - bx);
+        const bh = Math.min(block, height - by);
+        if (only && !only.some(r => hits(bx, by, bw, bh, r))) continue;
+        if (exclude.some(r => hits(bx, by, bw, bh, r))) continue;
+        let d = 0;
+        let dr = 0;
+        let dg = 0;
+        let db = 0;
+        let n = 0;
+        for (let y = by; y < by + bh; y++) {
+          for (let x = bx; x < bx + bw; x++) {
+            if (only && !only.some(r => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)) continue;
+            const i = (y * width + x) * 4;
+            const r = a.data[i] - b.data[i];
+            const g = a.data[i + 1] - b.data[i + 1];
+            const bl = a.data[i + 2] - b.data[i + 2];
+            d += (Math.abs(r) + Math.abs(g) + Math.abs(bl)) / 3;
+            dr += r;
+            dg += g;
+            db += bl;
+            n++;
+          }
+        }
+        if (!n) continue;
+        sumR += dr;
+        sumG += dg;
+        sumB += db;
+        total += n;
+        blocks.push({ x: bx, y: by, w: bw, h: bh, mean: d / n, shift: { r: dr / n, g: dg / n, b: db / n } });
+      }
+    }
+    if (!blocks.length) return { blocks: 0, base: 0, worst: null, hot: [], shift: null };
+    const base = median(blocks.map(item => item.mean));
+    const limit = Math.max(options.minLevel || 6, base * 4);
+    const hot = blocks.filter(item => item.mean >= limit).sort((x, y) => y.mean - x.mean);
+    const worst = blocks.reduce((p, q) => (q.mean > p.mean ? q : p));
+    // 整体偏色取各块偏移的中位数：一小块衣服被改不该被当成整幅偏色
+    const shift = { r: median(blocks.map(b => b.shift.r)), g: median(blocks.map(b => b.shift.g)), b: median(blocks.map(b => b.shift.b)) };
+    return {
+      blocks: blocks.length,
+      base,
+      limit,
+      worst,
+      hot,
+      hotShare: hot.length / blocks.length,
+      shift,
+      meanShift: total ? { r: sumR / total, g: sumG / total, b: sumB / total } : null
+    };
+  }
+
+  function outsideVerdict(result) {
+    if (!result || !result.blocks) return { kind: 'unknown', text: '没有可比的未修区' };
+    const s = result.shift;
+    const tint = s ? `R${s.r >= 0 ? '+' : ''}${s.r.toFixed(1)} G${s.g >= 0 ? '+' : ''}${s.g.toFixed(1)} B${s.b >= 0 ? '+' : ''}${s.b.toFixed(1)}` : '';
+    const global = s && Math.max(Math.abs(s.r), Math.abs(s.g), Math.abs(s.b)) >= 3;
+    if (global) {
+      return { kind: 'fail', global: true, text: `未修区整体偏色（${tint}），成片和原片的颜色处理不一致` };
+    }
+    if (result.hot.length) {
+      const w = result.hot[0];
+      return {
+        kind: 'fail',
+        at: { x: w.x, y: w.y, w: w.w, h: w.h },
+        text: `贴回区以外有 ${result.hot.length} 块被改动（最大差 ${w.mean.toFixed(1)}，噪声基线 ${result.base.toFixed(1)}），位置约 x=${w.x} y=${w.y}`
+      };
+    }
+    return { kind: 'ok', text: `贴回区以外只有编码噪声（基线 ${result.base.toFixed(1)}，最大块 ${result.worst.mean.toFixed(1)}）` };
+  }
+
+  // 保护区（原嘴、话筒）应完全来自原片：区内差异应和区外未修区的噪声同一水平
+  function protectVerdict(inside, baseline) {
+    if (!inside || !inside.blocks) return { kind: 'unknown', text: '保护区太小或在画外，没法比' };
+    const noise = Math.max(1, baseline || inside.base);
+    const worst = inside.worst.mean;
+    if (worst >= Math.max(6, noise * 4)) {
+      return { kind: 'fail', text: `保护区内有改动（最大差 ${worst.toFixed(1)}，未修区噪声 ${noise.toFixed(1)}），原嘴/保护内容没保住` };
+    }
+    return { kind: 'ok', text: `保护区和原片一致（最大差 ${worst.toFixed(1)}，噪声 ${noise.toFixed(1)}）` };
+  }
+
+  // 补丁跟着人动时，扫描框也得跟着动：每帧按当帧几何取同尺寸的框，
+  // 对照区固定取第一帧选定的那一侧（中途换边会把两块不同的地方拿来比）。
+  function createTrackedSampler(options = {}) {
+    let size = null;
+    let ctrlOffset = null;
+    let prev = null;
+    let prev2 = null;
+    const fit = (r, w, h, width, height) => ({
+      x: Math.max(0, Math.min(width - w, Math.round(r.x + r.w / 2 - w / 2))),
+      y: Math.max(0, Math.min(height - h, Math.round(r.y + r.h / 2 - h / 2))),
+      w,
+      h
+    });
+    return {
+      push(index, frame, rect) {
+        if (!size) {
+          size = { w: Math.max(2, Math.min(frame.width, Math.round(rect.w))), h: Math.max(2, Math.min(frame.height, Math.round(rect.h))) };
+          const first = fit(rect, size.w, size.h, frame.width, frame.height);
+          const c = options.control === false ? null : controlRect(first, frame.width, frame.height);
+          ctrlOffset = c && (c.x !== first.x || c.y !== first.y) ? { dx: c.x - first.x, dy: c.y - first.y } : null;
+        }
+        const r = fit(rect, size.w, size.h, frame.width, frame.height);
+        const cur = { roi: cropFrame(frame, r), ctrl: null, rect: r };
+        if (ctrlOffset) {
+          const cr = { x: r.x + ctrlOffset.dx, y: r.y + ctrlOffset.dy, w: r.w, h: r.h };
+          if (cr.x >= 0 && cr.y >= 0 && cr.x + cr.w <= frame.width && cr.y + cr.h <= frame.height) cur.ctrl = cropFrame(frame, cr);
+        }
+        let sample = null;
+        if (prev) {
+          const stats = frameDiffStats(prev.roi, cur.roi);
+          if (prev2) stats.mean2 = frameDiffStats(prev2.roi, cur.roi).mean;
+          sample = { frame: index, ...stats };
+          if (cur.ctrl && prev.ctrl) {
+            const c = frameDiffStats(prev.ctrl, cur.ctrl);
+            if (prev2 && prev2.ctrl) c.mean2 = frameDiffStats(prev2.ctrl, cur.ctrl).mean;
+            sample.control = { frame: index, ...c };
+          }
+        }
+        prev2 = prev;
+        prev = cur;
+        return sample;
+      }
+    };
+  }
+
+  // 接点：窗口内第 at 帧（相对前一帧）的变化是不是孤立尖峰
+  function junctionVerdict(samples, at) {
+    const hit = samples.find(item => item.frame === at);
+    const others = samples.filter(item => item.frame !== at).map(item => item.mean);
+    if (!hit || others.length < 3) return { kind: 'unknown', ratio: 0, text: '接点前后帧数不够，量不了' };
+    const base = Math.max(median(others), 0.6);
+    const ratio = hit.mean / base;
+    if (ratio >= 3) return { kind: 'fail', ratio, text: `第 ${at + 1} 帧接点跳变：变化是前后常态的 ${ratio.toFixed(1)} 倍` };
+    if (ratio >= 2) return { kind: 'warn', ratio, text: `第 ${at + 1} 帧接点有轻微跳动（${ratio.toFixed(1)} 倍），慢放确认` };
+    return { kind: 'ok', ratio, text: `第 ${at + 1} 帧接点过渡平稳（${ratio.toFixed(1)} 倍）` };
+  }
+
   // 自动对齐：对每个候选偏移量出一组差异，取「平均差异最小」的那个。
   // 返回片常见少 1 帧或整体偏几帧，对不齐的话 A/B 和差异图全是假象。
   function pickBestOffset(scores) {
@@ -651,6 +957,17 @@
     edgeStepProfile,
     seamStepVerdict,
     breathingVerdict,
-    clampRect
+    clampRect,
+    rgbToLab,
+    meanLab,
+    deltaE76,
+    seamLab,
+    seamLabRelative,
+    seamColorVerdict,
+    regionChange,
+    outsideVerdict,
+    protectVerdict,
+    createTrackedSampler,
+    junctionVerdict
   };
 });

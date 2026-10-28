@@ -84,6 +84,7 @@ if (command.includes('-vf')) {
       cacheDir: path.join(root, 'cache', 'video'),
       thumbsDir: path.join(root, 'cache', 'thumbs'),
       uploadsDir: path.join(root, 'cache', 'uploads'),
+      youtubeDir: path.join(root, 'cache', 'youtube'),
       rclonePath: tool,
       ffmpegPath: tool,
       rcloneConfigPath: path.join(root, 'data', 'rclone', 'rclone.conf'),
@@ -104,7 +105,7 @@ test('embedded server authenticates, persists settings, and closes', async t => 
 
   const headers = { 'X-Video-Checker-Token': 'test-token' };
   const health = await fetch(`${handle.url}/api/health`, { headers });
-  assert.deepEqual(await health.json(), { ok: true, app: 'video-checker', apiVersion: 11 });
+  assert.deepEqual(await health.json(), { ok: true, app: 'video-checker', apiVersion: 12 });
 
   const settings = await fetch(`${handle.url}/api/settings`, {
     method: 'POST',
@@ -116,6 +117,14 @@ test('embedded server authenticates, persists settings, and closes', async t => 
   assert.deepEqual(JSON.parse(fs.readFileSync(options.settingsFile, 'utf8')), {
     remote: 'drive:', sortMode: 'new', ramCacheGb: 4, ramMaxVideoGb: 1, holdSeekRate: 8, playbackRate: 0.5
   });
+
+  const looped = await fetch(`${handle.url}/api/settings`, {
+    method: 'POST',
+    headers: { ...headers, Origin: handle.url },
+    body: JSON.stringify({ loopVideo: true })
+  });
+  assert.equal((await looped.json()).loopVideo, true);
+  assert.equal(JSON.parse(fs.readFileSync(options.settingsFile, 'utf8')).loopVideo, true);
 
   const imported = await fetch(`${handle.url}/api/remotes/import-config`, {
     method: 'POST',
@@ -506,4 +515,104 @@ test('穿帮点的写入、排序、清洗与清空', async () => {
   assert.equal(sanitizeFlags(Array.from({ length: 600 }, (_, i) => ({ frame: i, t: i }))).length, 500);
 
   await handle.close();
+});
+
+test('YouTube downloads run yt-dlp, report progress, and open as a local video', async t => {
+  const { root, options } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const ytdlp = path.join(root, 'fake-yt-dlp');
+  fs.writeFileSync(ytdlp, `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const args = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(path.join(root, 'yt-args.json'))}, JSON.stringify(args));
+const url = args[args.length - 1];
+const id = new URL(url).searchParams.get('v');
+if (id === 'privateVid1') { process.stderr.write('ERROR: [youtube] privateVid1: Private video\\n'); process.exit(1); }
+const dir = args[args.indexOf('-P') + 1];
+process.stdout.write('VCT 测试 视频\\n');
+process.stdout.write('VCP 50 100 NA\\n');
+setTimeout(() => {
+  process.stdout.write('VCP 100 100 NA\\n');
+  fs.writeFileSync(path.join(dir, '测试 视频 [' + id + '].mp4'), 'video');
+}, 50);
+`, { mode: 0o755 });
+  const handle = await createVideoCheckerServer({ ...options, ytdlpPath: ytdlp });
+  t.after(() => handle.close());
+  const headers = { 'X-Video-Checker-Token': 'test-token', Origin: handle.url };
+  const post = (route, body) => fetch(`${handle.url}${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
+
+  assert.equal((await post('/api/youtube/download', { id: '../../etc/pa' })).status, 400);
+
+  const started = await (await post('/api/youtube/download', { id: 'dQw4w9WgXcQ' })).json();
+  assert.equal(started.state, 'running');
+  let status;
+  // 慢的 CI 机器上 node 起一个子进程就要一秒多，给足 15 秒
+  for (let i = 0; i < 750; i++) {
+    status = await (await fetch(`${handle.url}/api/youtube/status?id=dQw4w9WgXcQ`, { headers })).json();
+    if (status.state !== 'running') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(status.state, 'done');
+  assert.equal(status.title, '测试 视频');
+  assert.match(status.local.remote, /^local-/);
+  assert.deepEqual(status.local.startNames, ['测试 视频 [dQw4w9WgXcQ].mp4']);
+  const args = JSON.parse(fs.readFileSync(path.join(root, 'yt-args.json'), 'utf8'));
+  assert.equal(args[args.length - 1], 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  assert.ok(args.includes('--no-playlist'));
+  assert.ok(args.includes('--no-simulate'));
+
+  const stream = await fetch(`${handle.url}/stream/${status.local.remote}/${encodeURIComponent(status.local.startNames[0])}`, { headers });
+  assert.equal(await stream.text(), 'video');
+
+  // 已下载过的直接复用，不再启动 yt-dlp
+  fs.rmSync(path.join(root, 'yt-args.json'));
+  assert.equal((await (await post('/api/youtube/download', { id: 'dQw4w9WgXcQ' })).json()).state, 'done');
+  assert.equal(fs.existsSync(path.join(root, 'yt-args.json')), false);
+
+  await post('/api/youtube/download', { id: 'privateVid1' });
+  // 慢的 CI 机器上 node 起一个子进程就要一秒多，给足 15 秒
+  for (let i = 0; i < 750; i++) {
+    status = await (await fetch(`${handle.url}/api/youtube/status?id=privateVid1`, { headers })).json();
+    if (status.state !== 'running') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(status.state, 'error');
+  assert.equal(status.error, 'privateVid1: Private video');
+});
+
+test('review store, sidecar JSON next to a local video, and flag notes', async t => {
+  const { root, options } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const folder = path.join(root, 'local');
+  fs.mkdirSync(folder);
+  fs.writeFileSync(path.join(folder, 'cut.mp4'), 'video');
+  fs.writeFileSync(path.join(folder, 'cut.report.json'), '{"configuration":{"patches":[]}}');
+  fs.writeFileSync(path.join(folder, 'notes.txt'), 'secret');
+  const handle = await createVideoCheckerServer(options);
+  t.after(() => handle.close());
+  const headers = { 'X-Video-Checker-Token': 'test-token', Origin: handle.url };
+  const post = (route, body) => fetch(`${handle.url}${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
+
+  const opened = await (await post('/api/local/open', { paths: [folder] })).json();
+  const side = await fetch(`${handle.url}/api/sidecar?remote=${opened.remote}&path=cut.report.json`, { headers });
+  assert.equal((await side.json()).text, '{"configuration":{"patches":[]}}');
+  assert.equal((await fetch(`${handle.url}/api/sidecar?remote=${opened.remote}&path=notes.txt`, { headers })).status, 400, '只读 .json');
+  assert.equal((await fetch(`${handle.url}/api/sidecar?remote=${opened.remote}&path=../x.json`, { headers })).status, 400);
+
+  const key = `${opened.remote}:cut.mp4`;
+  await post('/api/review', { key, plan: { name: 'cut.report.json', text: '{}' }, watched: [[10, 20], [15, 30], [40, 41], [-1, 5], [9, 3]] });
+  const saved = await (await post('/api/review', { key, checks: { normal_speed_full_playback: { status: 'pass', note: '全看了' }, bogus: { status: 'maybe' } }, scope: '只修眼睛' })).json();
+  assert.deepEqual(saved.watched, [[10, 30], [40, 41]]);
+  assert.deepEqual(saved.checks, { normal_speed_full_playback: { status: 'pass', note: '全看了' } });
+  assert.equal(saved.plan.name, 'cut.report.json');
+  assert.equal(saved.scope, '只修眼睛');
+  const read = await (await fetch(`${handle.url}/api/review?key=${encodeURIComponent(key)}`, { headers })).json();
+  assert.deepEqual(read.watched, [[10, 30], [40, 41]]);
+  await post('/api/review', { key, plan: null });
+  assert.equal((await (await fetch(`${handle.url}/api/review?key=${encodeURIComponent(key)}`, { headers })).json()).plan, undefined);
+
+  await post('/api/marks', { key, flags: [{ frame: 5, t: 0.2, note: '  接缝色差明显  ' }, { frame: 6, t: 0.25 }] });
+  const marks = await (await fetch(`${handle.url}/api/marks`, { headers })).json();
+  assert.deepEqual(marks[key].flags, [{ frame: 5, t: 0.2, note: '接缝色差明显' }, { frame: 6, t: 0.25 }]);
 });
