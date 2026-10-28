@@ -352,3 +352,135 @@ test('帧间残差的相关性：独立噪声 -0.5，部分像素翻转接近 -1
   const uniform = temporalResidual(make(0, allFlip), make(1, allFlip), make(2, allFlip), null);
   assert.ok(Math.abs(uniform.corr) < 0.1, '均匀闪烁没有空间图案，corr 应接近 0（判闪烁靠 lag-2 比值）');
 });
+
+// ---------- 补丁验收：LAB 接缝色差 / 遮罩外改动 / 保护区 / 跟随扫描 / 接点 ----------
+const I = require('../public/inspect');
+const noise = (x, y, seed = 0) => ((x * 73856093) ^ (y * 19349663) ^ seed) % 7 - 3;
+const skin = (x, y) => [196 + noise(x, y), 150 + noise(x, y, 1), 128 + noise(x, y, 2)];
+
+test('rgbToLab 和 CIE 标准值一致（白、纯红、中灰）', () => {
+  const near = (a, b, eps = 0.05) => assert.ok(Math.abs(a - b) < eps, `${a} vs ${b}`);
+  const white = I.rgbToLab(255, 255, 255);
+  near(white.L, 100); near(white.a, 0); near(white.b, 0);
+  const red = I.rgbToLab(255, 0, 0);
+  near(red.L, 53.24); near(red.a, 80.09); near(red.b, 67.20);
+  near(I.rgbToLab(128, 128, 128).L, 53.59);
+});
+
+test('接缝 LAB 色差按边分别量，偏色只出现在下边时报下边', () => {
+  const rect = { x: 100, y: 60, w: 120, h: 120 };
+  // 补丁下半部分（脖子位置）偏红，上半部分和外面一致
+  const frame = makeFrame(320, 260, (x, y) => {
+    const inPatch = x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+    const [r, g, b] = skin(x, y);
+    return inPatch && y > rect.y + rect.h / 2 ? [r + 25, g - 5, b - 5] : [r, g, b];
+  });
+  const result = I.seamLab(frame, rect, { feather: 4, frameHeight: 1080 });
+  assert.equal(result.worst.edge, 'bottom');
+  assert.ok(result.worst.dE > 8, `下边色差应明显，实际 ${result.worst.dE}`);
+  assert.ok(result.edges.top.dE < 1.5, `上边应一致，实际 ${result.edges.top.dE}`);
+  assert.equal(result.unit, 'CIE76');
+  const verdict = I.seamColorVerdict([{ frame: 10, ...result }]);
+  assert.equal(verdict.kind, 'fail');
+  assert.match(verdict.text, /下边.*ΔE76/);
+});
+
+test('接缝色差随时间跳动要单独报出来', () => {
+  const rect = { x: 60, y: 60, w: 100, h: 100 };
+  const series = [0, 0, 12, 0].map((tint, i) => {
+    const frame = makeFrame(240, 240, (x, y) => {
+      const inPatch = x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+      const [r, g, b] = skin(x, y);
+      return inPatch ? [r + tint, g, b] : [r, g, b];
+    });
+    return { frame: i, ...I.seamLab(frame, rect, { feather: 2, frameHeight: 1080 }) };
+  });
+  const verdict = I.seamColorVerdict(series);
+  assert.ok(verdict.jump && verdict.jump.d >= 3, JSON.stringify(verdict.jump));
+  assert.notEqual(verdict.kind, 'ok');
+  assert.match(verdict.text, /不稳/);
+});
+
+test('遮罩外的改动（衣服被调色）能找出来，遮罩内的改动不算', () => {
+  const original = makeFrame(240, 240, skin);
+  const matte = { x: 80, y: 20, w: 80, h: 80 };
+  const sleeve = { x: 20, y: 180, w: 40, h: 40 };
+  const finished = makeFrame(240, 240, (x, y) => {
+    const [r, g, b] = skin(x, y);
+    if (x >= matte.x && x < matte.x + matte.w && y >= matte.y && y < matte.y + matte.h) return [r - 40, g + 30, b];
+    if (x >= sleeve.x && x < sleeve.x + sleeve.w && y >= sleeve.y && y < sleeve.y + sleeve.h) return [r + 20, g, b - 15];
+    return [r + (x % 3 === 0 ? 1 : 0), g, b];
+  });
+  const clean = I.regionChange(finished, original, { exclude: [matte, sleeve], block: 20 });
+  assert.equal(I.outsideVerdict(clean).kind, 'ok');
+  const dirty = I.regionChange(finished, original, { exclude: [matte], block: 20 });
+  const verdict = I.outsideVerdict(dirty);
+  assert.equal(verdict.kind, 'fail');
+  assert.ok(verdict.at.x < 60 && verdict.at.y >= 160, JSON.stringify(verdict.at));
+});
+
+test('保护区被改了要报，没改只算编码噪声', () => {
+  const original = makeFrame(160, 160, skin);
+  const mouth = { x: 60, y: 100, w: 40, h: 20 };
+  const kept = makeFrame(160, 160, (x, y) => skin(x, y).map(v => v + (y % 2)));
+  const changed = makeFrame(160, 160, (x, y) => {
+    const v = skin(x, y);
+    return x >= mouth.x && x < mouth.x + mouth.w && y >= mouth.y && y < mouth.y + mouth.h ? [v[0] - 30, v[1] - 30, v[2]] : v;
+  });
+  assert.equal(I.protectVerdict(I.regionChange(kept, original, { only: [mouth], block: 10 }), 1).kind, 'ok');
+  assert.equal(I.protectVerdict(I.regionChange(changed, original, { only: [mouth], block: 10 }), 1).kind, 'fail');
+});
+
+test('跟随扫描：框跟着人平移时不把运动当成变化，补丁闪烁照样抓到', () => {
+  const W = 200;
+  const H = 120;
+  const frames = [];
+  const rects = [];
+  for (let i = 0; i < 12; i++) {
+    const ox = 20 + i * 6;
+    const rect = { x: ox + 10, y: 30, w: 40, h: 40 };
+    rects.push(rect);
+    const flicker = i % 2 ? 20 : -20;
+    frames.push(makeFrame(W, H, (x, y) => {
+      // 人（带纹理）随 ox 平移，背景静止
+      const inPerson = x >= ox && x < ox + 60 && y >= 20 && y < 80;
+      if (!inPerson) return [60, 60, 60];
+      const t = ((x - ox) * 7 + y * 3) % 50 + 100;
+      const inPatch = x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+      return inPatch ? [t + flicker, t + flicker, t + flicker] : [t, t, t];
+    }));
+  }
+  const steady = I.createTrackedSampler({ control: false });
+  const fixed = I.createScanSampler({ rect: rects[0] });
+  const tracked = [];
+  const still = [];
+  frames.forEach((f, i) => {
+    const s = steady.push(i, f, rects[i]);
+    if (s) tracked.push(s);
+    const t = fixed.push(i, f);
+    if (t) still.push(t);
+  });
+  assert.equal(I.scanVerdict(tracked).kind, 'flicker');
+  // 去掉闪烁再跑一遍：跟随扫描应判平稳
+  const calm = I.createTrackedSampler({ control: false });
+  const calmSamples = [];
+  frames.forEach((f, i) => {
+    const copy = { ...f, data: new Uint8ClampedArray(f.data) };
+    const r = rects[i];
+    const delta = i % 2 ? -20 : 20;
+    for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) {
+      const p = (y * W + x) * 4;
+      copy.data[p] += delta; copy.data[p + 1] += delta; copy.data[p + 2] += delta;
+    }
+    const s = calm.push(i, copy, r);
+    if (s) calmSamples.push(s);
+  });
+  assert.equal(I.scanVerdict(calmSamples).kind, 'ok');
+});
+
+test('接点：孤立尖峰报跳变，平滑过渡不报', () => {
+  const samples = [3, 4, 5, 6, 7, 8, 9].map(frame => ({ frame, mean: frame === 6 ? 12 : 2 }));
+  assert.equal(I.junctionVerdict(samples, 6).kind, 'fail');
+  assert.equal(I.junctionVerdict(samples.map(s => ({ ...s, mean: 2 })), 6).kind, 'ok');
+  assert.equal(I.junctionVerdict(samples.slice(0, 2), 6).kind, 'unknown');
+});

@@ -10,6 +10,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { parseMediaInfo } = require('./server');
 const INSPECT = require('./public/inspect');
+const PatchPlan = require('./public/patch-plan');
+const PatchCheck = require('./public/patch-check');
 
 const RUNTIME_DIRS = {
   darwin: { arm64: 'darwin-arm64', x64: 'darwin-x64' },
@@ -99,6 +101,152 @@ function readFrames(file, info, { startFrame, count, width, onFrame }) {
   });
 }
 
+// 流式读帧：一个 ffmpeg 进程顺序吐帧，按需拉取（stdout 自带背压），4K 长片也不爆内存
+async function* streamFrames(file, info, startFrame, count, width) {
+  const height = evenHeight(info, width);
+  const frameBytes = width * height * 4;
+  const startSec = Math.max(0, (startFrame - 0.25) / info.fps);
+  const proc = spawn(ffmpegPath(), [
+    '-hide_banner', '-loglevel', 'error', '-ss', startSec.toFixed(6), '-i', file,
+    '-frames:v', String(count), '-vf', `scale=${width}:${height}`, '-pix_fmt', 'rgba', '-f', 'rawvideo', '-'
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  proc.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
+  const exited = new Promise(resolve => proc.on('close', resolve));
+  let pending = Buffer.alloc(0);
+  let index = 0;
+  try {
+    for await (const chunk of proc.stdout) {
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      while (pending.length >= frameBytes && index < count) {
+        const data = new Uint8ClampedArray(pending.subarray(0, frameBytes));
+        pending = pending.subarray(frameBytes);
+        yield { frame: startFrame + index, data, width, height };
+        index++;
+      }
+    }
+  } finally {
+    if (proc.exitCode === null) proc.kill('SIGTERM');
+  }
+  const code = await exited;
+  if (index === 0) throw new Error(`取不到画面(ffmpeg ${code}): ${stderr.trim().slice(-200)}`);
+}
+
+// 帧号列表 → 连续段，每段一个 ffmpeg 进程
+async function* readFrameList(file, info, frames, width) {
+  const w = width === 'full' ? info.width : width;
+  const sorted = [...new Set(frames)].filter(f => f >= 0).sort((a, b) => a - b);
+  for (let i = 0; i < sorted.length;) {
+    let j = i;
+    // 间隔 ≤ 8 帧就并成一段顺序解，比重新 seek 快
+    while (j + 1 < sorted.length && sorted[j + 1] - sorted[j] <= 8) j++;
+    const want = new Set(sorted.slice(i, j + 1));
+    for await (const f of streamFrames(file, info, sorted[i], sorted[j] - sorted[i] + 1, w)) {
+      if (want.has(f.frame)) yield { frame: f.frame, image: f };
+    }
+    i = j + 1;
+  }
+}
+
+// RGBA 像素 → PNG（交给 ffmpeg 编码，不额外依赖图像库）
+function writePng(image, file) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath(), [
+      '-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgba',
+      '-s', `${image.width}x${image.height}`, '-i', '-', '-frames:v', '1', file
+    ], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', chunk => { stderr += chunk; });
+    proc.on('error', reject);
+    proc.on('close', code => (code === 0 ? resolve(file) : reject(new Error('写 PNG 失败: ' + stderr.slice(-200)))));
+    proc.stdin.end(Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength));
+  });
+}
+
+const MAX_SHEET_TILES = 400;
+
+async function cmdPatchcheck(file, flags) {
+  if (!flags.plan || !fs.existsSync(flags.plan)) throw new Error('要用 --plan 指定 merge.json 或 *.report.json');
+  const plan = PatchPlan.parse(fs.readFileSync(flags.plan, 'utf8'));
+  const info = await probe(file);
+  const sourceFile = typeof flags.source === 'string' ? flags.source : null;
+  if (sourceFile && !fs.existsSync(sourceFile)) throw new Error('找不到原片: ' + sourceFile);
+  const sourceInfo = sourceFile ? await probe(sourceFile) : null;
+  let offset = Number(flags.offset) || 0;
+  let align = null;
+  if (sourceFile && flags.align) {
+    align = await alignOffset(file, info, sourceFile, sourceInfo, 360, Number(flags.search) || 10);
+    if (align && flags.offset === undefined) offset = align.offset;
+  }
+  const provider = {
+    read: (frames, width) => readFrameList(file, info, frames, width),
+    readSource: sourceFile ? async function* (frames, width) {
+      // 原片统一缩放到成片尺寸，逐像素比较才成立
+      for await (const item of readFrameList(sourceFile, sourceInfo, frames.map(f => f + offset), width === 'full' ? info.width : width)) {
+        yield { frame: item.frame - offset, image: item.image };
+      }
+    } : null
+  };
+  // 联系图：所有修补帧（太多时等间隔抽），边检查边缩
+  const patched = PatchPlan.patchedFrames(plan).length;
+  const stride = Math.max(1, Math.ceil(patched / MAX_SHEET_TILES));
+  const tiles = [];
+  const wantSheet = typeof flags.sheet === 'string';
+  const result = await PatchCheck.run({
+    plan,
+    info,
+    provider,
+    onProgress: flags.quiet ? undefined : (text => process.stderr.write(`\r${text}            `)),
+    onPatchFrame: wantSheet ? (p, frame, image, g) => {
+      if ((frame - p.start) % stride === 0) tiles.push(PatchCheck.tile(image, g, frame, Number(flags['tile-width']) || 160));
+    } : undefined
+  });
+  if (!flags.quiet) process.stderr.write('\n');
+  const outputs = {};
+  if (wantSheet && tiles.length) {
+    tiles.sort((a, b) => a.frame - b.frame);
+    outputs.sheet = await writePng(PatchCheck.contactSheet(tiles), flags.sheet);
+    outputs.sheetFrames = { count: tiles.length, stride, note: stride > 1 ? `修补帧太多，每 ${stride} 帧取 1 帧` : '全部修补帧' };
+  }
+  // 证据图：每个补丁首/中/末 + 自动发现问题的帧，成片/原片/差异三联
+  if (typeof flags.evidence === 'string') {
+    fs.mkdirSync(flags.evidence, { recursive: true });
+    const scale = PatchPlan.scaleFor(plan, info.width, info.height);
+    const wanted = new Map();
+    for (const p of plan.patches) for (const f of PatchCheck.spread(p.start, p.end, 3)) wanted.set(f, p);
+    for (const f of result.findings) {
+      if (!Number.isInteger(f.frame) || wanted.size >= 24) continue;
+      const p = plan.patches.find(q => q.start <= f.frame && f.frame < q.end) || plan.patches.find(q => q.name === f.patch);
+      if (p) wanted.set(Math.min(p.end - 1, Math.max(p.start, f.frame)), p);
+    }
+    const frames = [...wanted.keys()].sort((a, b) => a - b);
+    const src = new Map();
+    if (provider.readSource) for await (const item of provider.readSource(frames, 'full')) src.set(item.frame, item.image);
+    outputs.evidence = [];
+    for await (const { frame, image } of provider.read(frames, 'full')) {
+      const g = PatchPlan.geometryAt(wanted.get(frame), frame, scale);
+      const pad = Math.max(16, g.featherPx * 2);
+      const rect = { x: g.matte.x - pad, y: g.matte.y - pad, w: g.matte.w + pad * 2, h: g.matte.h + pad * 2 };
+      const zoom = Math.max(1, Math.min(4, Math.floor(480 / rect.w)));
+      const out = path.join(flags.evidence, `frame-${String(frame + 1).padStart(6, '0')}.png`);
+      await writePng(PatchCheck.triptych(image, src.get(frame) || null, rect, { zoom, frame }), out);
+      outputs.evidence.push({ frame, file: out });
+    }
+  }
+  if (typeof flags.review === 'string') {
+    const record = PatchCheck.reviewRecord({
+      plan,
+      result,
+      finalFile: path.basename(file),
+      technicalReport: plan.kind === 'report' ? path.basename(flags.plan) : null,
+      sheet: outputs.sheet || null
+    });
+    fs.writeFileSync(flags.review, JSON.stringify(record, null, 2));
+    outputs.review = flags.review;
+  }
+  emit({ file, plan: flags.plan, source: sourceFile, offset, align, ...result, outputs });
+}
+
 async function readOneFrame(file, info, frame, width) {
   let out = null;
   await readFrames(file, info, { startFrame: frame, count: 1, width, onFrame: f => { out = f; } });
@@ -126,6 +274,12 @@ const HELP = `穿帮检查命令行（帧号从 0 开始，区间是 [from, to) 
   node cli.js scan    <文件> --from 110 --to 136 [--rect x,y,w,h] [--width 360]
   node cli.js compare <成片> <原片> [--frame N] [--offset N] [--align] [--width 360]
   node cli.js roi     <文件> --frame 60 --rect x,y,w,h
+  node cli.js patchcheck <成片> --plan merge.json|成片.report.json [--source 原片] [--offset N | --align]
+                         [--review 验收记录.json] [--sheet 联系图.png] [--evidence 证据目录] [--quiet]
+
+patchcheck 按 flow-video-patch 的补丁配置逐个补丁体检：补丁区内闪烁/跳变/抖动（框跟着关键帧走）、
+接缝台阶与呼吸、接缝 LAB 色差（CIE76）、每个接点前后跳变；给了原片还会查贴回区以外有没有被改、
+保护区有没有保住。--review 输出视觉验收记录（人工项保持 not_run，自动发现写进 evidence）。
 
 公共选项
   --width N   分析用的缩放宽度，默认 360（roi 固定用原始像素；scan 给了 --rect 时默认原始像素）
@@ -365,6 +519,7 @@ async function main() {
   if (command === 'probe') { needFile('probe'); return cmdProbe(rest[0]); }
   if (command === 'scan') { needFile('scan'); return cmdScan(rest[0], flags); }
   if (command === 'roi') { needFile('roi'); return cmdRoi(rest[0], flags); }
+  if (command === 'patchcheck') { needFile('patchcheck'); return cmdPatchcheck(rest[0], flags); }
   if (command === 'compare') {
     needFile('compare');
     if (!rest[1] || !fs.existsSync(rest[1])) throw new Error('compare 要给两个文件：成片 原片');
