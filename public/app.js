@@ -576,14 +576,16 @@ let dragTarget = 0; // 手指的精确位置，松手时落到这里
 
 function onDragMove(clientX) {
   dragTarget = barTime(clientX);
-  if (showScrubFrame(dragTarget)) {
-    if (dragSeekRaf) { cancelAnimationFrame(dragSeekRaf); dragSeekRaf = 0; }
-  } else if (cacheReady) {
-    // 用本地原片持续更新高清画面；每帧只保留最新位置，避免过期 seek 堆积花屏。
+  if (cacheReady) {
+    // 原片已在本地/RAM：只用真实 seek 刷新原画质画面。
+    // 不再和 240px 缩略帧来回切换——低清帧被拉满屏、又与高清帧交替闪现，就是拖动时的花屏。
     scrubPreviewSeq++;
     requestedScrubSrc = '';
     $('scrub-overlay').style.display = 'none';
     scheduleDragSeek(dragTarget);
+  } else {
+    // 流播时 seek 会卡在网络上，用缩略帧预览；某帧还没解码好就保留上一帧，不闪回旧画面。
+    showScrubFrame(dragTarget);
   }
   showTip(clientX);
 }
@@ -1305,7 +1307,7 @@ function startArrowHold(key, shiftKey) {
       hold.lastTick = now;
       const target = Math.min(video.duration, Math.max(0, video.currentTime + direction * rate * elapsed));
       chainSeek(target);
-      showScrubFrame(target);
+      if (!cacheReady) showScrubFrame(target);
     }, 50);
   }, 1000);
 }
