@@ -547,7 +547,8 @@ setTimeout(() => {
   const started = await (await post('/api/youtube/download', { id: 'dQw4w9WgXcQ' })).json();
   assert.equal(started.state, 'running');
   let status;
-  for (let i = 0; i < 100; i++) {
+  // 慢的 CI 机器上 node 起一个子进程就要一秒多，给足 15 秒
+  for (let i = 0; i < 750; i++) {
     status = await (await fetch(`${handle.url}/api/youtube/status?id=dQw4w9WgXcQ`, { headers })).json();
     if (status.state !== 'running') break;
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -570,7 +571,8 @@ setTimeout(() => {
   assert.equal(fs.existsSync(path.join(root, 'yt-args.json')), false);
 
   await post('/api/youtube/download', { id: 'privateVid1' });
-  for (let i = 0; i < 100; i++) {
+  // 慢的 CI 机器上 node 起一个子进程就要一秒多，给足 15 秒
+  for (let i = 0; i < 750; i++) {
     status = await (await fetch(`${handle.url}/api/youtube/status?id=privateVid1`, { headers })).json();
     if (status.state !== 'running') break;
     await new Promise(resolve => setTimeout(resolve, 20));
