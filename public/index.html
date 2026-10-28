@@ -61,7 +61,13 @@
     <div class="insp-actions cmp-modes">
       <button data-mode="toggle" class="on" title="按 X 在 A/B 之间翻">切换</button>
       <button data-mode="wipe" title="拖动分界线左右对比">拉幕</button>
+      <button data-mode="overlay" title="成片半透明叠在原片上">叠加</button>
       <button data-mode="diff" title="两片相减并放大：补丁范围和多动的地方会亮起来">差异</button>
+    </div>
+    <div class="insp-actions" id="cmp-overlay-row" hidden>
+      <span class="cmp-label">A 不透明度</span>
+      <input type="range" id="cmp-alpha" min="0" max="100" value="50">
+      <span id="cmp-alpha-val">50%</span>
     </div>
     <div class="insp-actions">
       <span class="cmp-label">偏移</span>
