@@ -82,6 +82,7 @@ async function createWindow() {
     port: 0,
     publicDir: path.join(app.getAppPath(), 'public'),
     marksFile: paths.marksFile,
+    reviewsFile: paths.reviewsFile,
     settingsFile: paths.settingsFile,
     keysDir: paths.keysDir,
     cacheDir: paths.videoCacheDir,

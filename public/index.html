@@ -89,6 +89,24 @@
     </div>
     <div id="cmp-status"></div>
   </div>
+  <div id="patch-panel" hidden>
+    <div class="flag-head">
+      <span id="patch-title">补丁配置</span>
+      <button id="patch-load-btn" title="载入 flow-video-patch 的 merge.json 或 *.report.json">载入</button>
+      <button id="patch-unload-btn" hidden title="不再用这份配置">移除</button>
+    </div>
+    <input type="file" id="patch-file" accept=".json,application/json" hidden>
+    <div id="patch-list"></div>
+    <div id="patch-coverage"></div>
+    <div class="insp-actions" id="patch-actions" hidden>
+      <button id="patch-check-btn" title="逐个补丁查闪烁/跳变/接缝/接点；开着 A/B 对比时还会和原片比（只报补丁新引入的问题）">补丁体检</button>
+      <button id="patch-sheet-btn" title="全部修补帧拼成一张联系图（PNG）">联系图</button>
+      <button id="patch-evidence-btn" title="当前帧：成片 / 原片 / 差异 三联放大图（PNG）">证据图</button>
+      <button id="patch-review-btn" title="13 项视觉验收：逐项填写，导出验收记录 JSON">验收</button>
+    </div>
+    <div id="patch-progress" hidden><span id="patch-progress-text"></span><button id="patch-stop-btn">停止</button></div>
+    <div id="patch-findings"></div>
+  </div>
   <div id="inspect-panel" hidden>
     <canvas id="scan-chart" width="300" height="44" hidden></canvas>
     <div id="inspect-text"></div>
@@ -128,7 +146,8 @@
       <kbd>Enter</kbd> 下一个　<kbd>P</kbd> 上一个　<kbd>[</kbd>/<kbd>]</kbd> 放慢/加快　拖动进度条可逐帧看画面<br>
       <kbd>F</kbd> 记一个穿帮点　<kbd>J</kbd> 跳到指定帧　<kbd>I</kbd>/<kbd>O</kbd> 设区间首/尾帧　<kbd>L</kbd> 区间循环（未设区间时取当前帧±10）　<kbd>Shift+L</kbd> 整个视频循环播放<br>
       <kbd>S</kbd> 扫描区间找跳变/闪烁　<kbd>D</kbd> 差分视图　<kbd>Z</kbd> 放大镜（滚轮调倍数）　<kbd>R</kbd> 框选补丁区比清晰度和色差<br>
-      <kbd>C</kbd> 和原片 A/B 对比　<kbd>X</kbd> 在成片/原片之间翻　<kbd>V</kbd> 换对比方式（切换·拉幕·差异）<br><br>
+      <kbd>C</kbd> 和原片 A/B 对比　<kbd>X</kbd> 在成片/原片之间翻　<kbd>V</kbd> 换对比方式（切换·拉幕·差异）<br>
+      <kbd>B</kbd> 显示/隐藏补丁框　<kbd>N</kbd>/<kbd>Shift+N</kbd> 跳到下一个/上一个补丁接点（载入补丁配置后）<br><br>
       也可以把本机的视频或文件夹直接拖进这个窗口检查
     </div>
     <video id="video" preload="auto" style="display:none"></video>
@@ -137,6 +156,7 @@
     <canvas id="fx-canvas" hidden></canvas>
     <canvas id="cmp-canvas" hidden></canvas>
     <video id="video-b" preload="auto" muted playsinline hidden></video>
+    <canvas id="patch-layer" hidden></canvas>
     <div id="roi-layer" hidden><div id="roi-box" hidden></div></div>
     <canvas id="zoom-canvas" hidden></canvas>
     <button id="prev-btn" class="ov-nav" title="P">‹</button>
@@ -147,6 +167,7 @@
     <div id="seekbar">
       <div id="seek-track"><div id="seek-buffered"></div><div id="seek-played"></div></div>
       <div id="seek-loop" hidden></div>
+      <div id="seek-patches"></div>
       <div id="seek-flags"></div>
       <div id="seek-handle"></div>
       <div id="seek-tip"></div>
@@ -179,6 +200,20 @@
 </div>
 
 <div id="drop-hint" hidden>松手即可检查这些本地视频</div>
+
+<div id="review-modal" class="modal" hidden>
+  <div class="modal-card review-card">
+    <h2>视觉验收记录</h2>
+    <p id="review-sub">按 flow-video-patch 的 13 项逐项填写。自动体检只给提示，结论由你定；没有按正常速度看完全部修补帧时，「正常速度完整播放」不能填通过。</p>
+    <label class="review-scope">修补目标与范围 <input id="review-scope" placeholder="例如：person-a 只修眉眼，保留原嘴；第 25–72 帧"></label>
+    <div id="review-rows"></div>
+    <div id="review-status"></div>
+    <div class="modal-buttons">
+      <button id="review-close-btn">关闭</button>
+      <button id="review-export-btn">导出 JSON</button>
+    </div>
+  </div>
+</div>
 
 <div id="ask-modal" class="modal" hidden>
   <div class="modal-card ask-card">
@@ -278,6 +313,9 @@
 <script src="/drive-link.js"></script>
 <script src="/youtube-link.js"></script>
 <script src="/batch-ops.js"></script>
+<script src="/patch-plan.js"></script>
+<script src="/patch-check.js"></script>
 <script src="/app.js"></script>
+<script src="/patch-ui.js"></script>
 </body>
 </html>

@@ -578,3 +578,39 @@ setTimeout(() => {
   assert.equal(status.state, 'error');
   assert.equal(status.error, 'privateVid1: Private video');
 });
+
+test('review store, sidecar JSON next to a local video, and flag notes', async t => {
+  const { root, options } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const folder = path.join(root, 'local');
+  fs.mkdirSync(folder);
+  fs.writeFileSync(path.join(folder, 'cut.mp4'), 'video');
+  fs.writeFileSync(path.join(folder, 'cut.report.json'), '{"configuration":{"patches":[]}}');
+  fs.writeFileSync(path.join(folder, 'notes.txt'), 'secret');
+  const handle = await createVideoCheckerServer(options);
+  t.after(() => handle.close());
+  const headers = { 'X-Video-Checker-Token': 'test-token', Origin: handle.url };
+  const post = (route, body) => fetch(`${handle.url}${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
+
+  const opened = await (await post('/api/local/open', { paths: [folder] })).json();
+  const side = await fetch(`${handle.url}/api/sidecar?remote=${opened.remote}&path=cut.report.json`, { headers });
+  assert.equal((await side.json()).text, '{"configuration":{"patches":[]}}');
+  assert.equal((await fetch(`${handle.url}/api/sidecar?remote=${opened.remote}&path=notes.txt`, { headers })).status, 400, '只读 .json');
+  assert.equal((await fetch(`${handle.url}/api/sidecar?remote=${opened.remote}&path=../x.json`, { headers })).status, 400);
+
+  const key = `${opened.remote}:cut.mp4`;
+  await post('/api/review', { key, plan: { name: 'cut.report.json', text: '{}' }, watched: [[10, 20], [15, 30], [40, 41], [-1, 5], [9, 3]] });
+  const saved = await (await post('/api/review', { key, checks: { normal_speed_full_playback: { status: 'pass', note: '全看了' }, bogus: { status: 'maybe' } }, scope: '只修眼睛' })).json();
+  assert.deepEqual(saved.watched, [[10, 30], [40, 41]]);
+  assert.deepEqual(saved.checks, { normal_speed_full_playback: { status: 'pass', note: '全看了' } });
+  assert.equal(saved.plan.name, 'cut.report.json');
+  assert.equal(saved.scope, '只修眼睛');
+  const read = await (await fetch(`${handle.url}/api/review?key=${encodeURIComponent(key)}`, { headers })).json();
+  assert.deepEqual(read.watched, [[10, 30], [40, 41]]);
+  await post('/api/review', { key, plan: null });
+  assert.equal((await (await fetch(`${handle.url}/api/review?key=${encodeURIComponent(key)}`, { headers })).json()).plan, undefined);
+
+  await post('/api/marks', { key, flags: [{ frame: 5, t: 0.2, note: '  接缝色差明显  ' }, { frame: 6, t: 0.25 }] });
+  const marks = await (await fetch(`${handle.url}/api/marks`, { headers })).json();
+  assert.deepEqual(marks[key].flags, [{ frame: 5, t: 0.2, note: '接缝色差明显' }, { frame: 6, t: 0.25 }]);
+});

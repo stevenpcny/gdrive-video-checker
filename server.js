@@ -121,9 +121,51 @@ function sanitizeFlags(input) {
     const frame = Number(item && item.frame);
     if (!Number.isInteger(frame) || frame < 0 || frame > 10_000_000) continue;
     const t = Number(item.t);
-    byFrame.set(frame, { frame, t: Number.isFinite(t) && t >= 0 ? Number(t.toFixed(3)) : 0 });
+    const entry = { frame, t: Number.isFinite(t) && t >= 0 ? Number(t.toFixed(3)) : 0 };
+    // 自动体检记下的穿帮点带一句说明（问题类型），手动按 F 的没有
+    if (typeof item.note === 'string' && item.note.trim()) entry.note = item.note.trim().slice(0, 160);
+    byFrame.set(frame, entry);
   }
   return [...byFrame.values()].sort((a, b) => a.frame - b.frame).slice(0, MAX_FLAGS_PER_VIDEO);
+}
+
+// 补丁验收记录：载入的补丁配置、正常速度播放覆盖、13 项人工审看状态
+const REVIEW_STATUSES = new Set(['not_run', 'pass', 'fail', 'not_applicable']);
+const REVIEW_PLAN_MAX = 512 * 1024;
+
+function sanitizeRanges(input) {
+  if (!Array.isArray(input)) return [];
+  const ranges = input
+    .filter(r => Array.isArray(r) && r.length === 2 && Number.isInteger(r[0]) && Number.isInteger(r[1]) && r[0] >= 0 && r[1] > r[0] && r[1] <= 10_000_000)
+    .map(r => [r[0], r[1]])
+    .sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const r of ranges) {
+    const last = out[out.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else out.push(r);
+  }
+  return out.slice(0, 5000);
+}
+
+function sanitizeReview(prev, body) {
+  const next = { ...(prev || {}) };
+  if (body.plan === null) delete next.plan;
+  else if (body.plan && typeof body.plan.text === 'string' && body.plan.text.length <= REVIEW_PLAN_MAX) {
+    next.plan = { name: String(body.plan.name || '').slice(0, 300), text: body.plan.text };
+  }
+  if (body.watched !== undefined) next.watched = sanitizeRanges(body.watched);
+  if (body.checks && typeof body.checks === 'object') {
+    const checks = {};
+    for (const [id, value] of Object.entries(body.checks)) {
+      if (!/^[a-z_]{1,64}$/.test(id) || !value || !REVIEW_STATUSES.has(value.status)) continue;
+      checks[id] = { status: value.status, note: typeof value.note === 'string' ? value.note.slice(0, 2000) : '' };
+    }
+    next.checks = checks;
+  }
+  if (typeof body.scope === 'string') next.scope = body.scope.slice(0, 2000);
+  next.time = new Date().toISOString();
+  return next;
 }
 
 function snapFps(value) {
@@ -229,6 +271,7 @@ async function createVideoCheckerServer(options = {}) {
   const requestedPort = Number.isInteger(options.port) ? options.port : 5572;
   const publicDir = path.resolve(options.publicDir || path.join(__dirname, 'public'));
   const marksFile = options.marksFile || path.join(__dirname, 'marks.json');
+  const reviewsFile = options.reviewsFile || path.join(path.dirname(marksFile), 'reviews.json');
   const settingsFile = options.settingsFile || path.join(__dirname, 'settings.json');
   const keysDir = options.keysDir || path.join(__dirname, 'keys');
   const cacheDir = options.cacheDir || path.join(os.tmpdir(), 'video-checker-cache');
@@ -1559,6 +1602,54 @@ async function createVideoCheckerServer(options = {}) {
         else marks[body.key] = { time: new Date().toISOString(), flags };
         writeMarks(marks);
         return json(res, 200, { ok: true });
+      }
+
+      if (url.pathname === '/api/review' && req.method === 'GET') {
+        const key = url.searchParams.get('key') || '';
+        return json(res, 200, readJson(reviewsFile, {})[key] || {});
+      }
+
+      if (url.pathname === '/api/review' && req.method === 'POST') {
+        const body = await readBody(req, REVIEW_PLAN_MAX + 256 * 1024);
+        if (typeof body.key !== 'string' || !body.key) return json(res, 400, { error: '缺 key' });
+        const all = readJson(reviewsFile, {});
+        if (body.clear) delete all[body.key];
+        else all[body.key] = sanitizeReview(all[body.key], body);
+        writeJsonAtomic(reviewsFile, all);
+        return json(res, 200, all[body.key] || {});
+      }
+
+      // 视频旁边的小 JSON（flow-video-patch 的 *.report.json / merge.json）
+      if (url.pathname === '/api/sidecar' && req.method === 'GET') {
+        const remote = url.searchParams.get('remote') || '';
+        const relPath = safePath(url.searchParams.get('path'));
+        if (!relPath || !/\.json$/i.test(relPath)) return json(res, 400, { error: '只读 .json 文件' });
+        await ensureRemote(remote);
+        const limit = 5 * 1024 * 1024;
+        if (isLocalRemote(remote)) {
+          const full = localFilePath(remote, relPath);
+          if (fs.statSync(full).size > limit) return json(res, 413, { error: '文件太大' });
+          return json(res, 200, { text: fs.readFileSync(full, 'utf8') });
+        }
+        const text = await new Promise((resolve, reject) => {
+          const proc = spawnRclone(['cat', remote + ':' + relPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+          const chunks = [];
+          let bytes = 0;
+          let stderr = '';
+          proc.stdout.on('data', chunk => {
+            bytes += chunk.length;
+            if (bytes > limit) proc.kill('SIGTERM');
+            else chunks.push(chunk);
+          });
+          proc.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-500); });
+          proc.on('error', reject);
+          proc.on('exit', code => {
+            if (bytes > limit) return reject(new Error('文件太大'));
+            if (code !== 0) return reject(new Error(stderr || `rclone cat 失败 (${code})`));
+            resolve(Buffer.concat(chunks).toString('utf8'));
+          });
+        });
+        return json(res, 200, { text });
       }
 
       if (url.pathname === '/api/remotes' && req.method === 'GET') {

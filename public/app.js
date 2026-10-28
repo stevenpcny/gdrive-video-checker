@@ -79,6 +79,8 @@ async function loadDir(p) {
     marks = m;
     dirs = listing.entries.filter(e => e.IsDir);
     videos = listing.entries.filter(e => !e.IsDir && isVideo(e.Name));
+    // 视频旁边的 JSON（flow-video-patch 的 *.report.json / merge.json），补丁验收自动载入用
+    window.sideFiles = listing.entries.filter(e => !e.IsDir && /\.json$/i.test(e.Name));
     applySort();
     render();
     renderFlags();
@@ -321,6 +323,7 @@ function play(i) {
   document.querySelector(`.entry[data-idx="${i}"]`)?.scrollIntoView({ block: 'nearest' });
   startFullLoad(v);
   prefetchAround(i);
+  window.PatchUI?.onVideo(v);
 }
 
 // ---------- 整片预载: 服务端只下载一份持久缓存 ----------
@@ -665,6 +668,7 @@ function updateBar() {
   let buf = 0;
   for (let i = 0; i < video.buffered.length; i++) buf = Math.max(buf, video.buffered.end(i));
   $('seek-buffered').style.width = (d ? buf / d * 100 : 0) + '%';
+  window.PatchUI?.tick();
   requestAnimationFrame(updateBar);
 }
 requestAnimationFrame(updateBar);
@@ -1538,7 +1542,8 @@ function renderFlags() {
     row.className = 'flag-row';
     row.innerHTML = '<span class="frame"></span><span class="at"></span><span class="del" title="删掉这个点">✕</span>';
     row.querySelector('.frame').textContent = '帧 ' + (item.frame + 1);
-    row.querySelector('.at').textContent = fmtAt(item.t);
+    row.querySelector('.at').textContent = item.note ? fmtAt(item.t) + ' · ' + item.note : fmtAt(item.t);
+    if (item.note) row.title = item.note;
     row.onclick = () => jumpToFrame(item.frame);
     row.querySelector('.del').onclick = e => { e.stopPropagation(); removeFlag(item.frame); };
     return row;
@@ -1564,7 +1569,7 @@ $('flag-copy-btn').onclick = async () => {
   const rows = [];
   for (const v of videos) {
     for (const item of flagsOf(markKey(v))) {
-      rows.push(`${v.Name}\t帧 ${item.frame + 1}\t${fmtAt(item.t)}`);
+      rows.push(`${v.Name}\t帧 ${item.frame + 1}\t${fmtAt(item.t)}${item.note ? '\t' + item.note : ''}`);
     }
   }
   if (!rows.length) return toast('这个文件夹还没有穿帮点');
@@ -1642,6 +1647,7 @@ function layoutOverlays() {
     el.style.height = box.height + 'px';
   }
   renderRoiBox();
+  window.PatchUI?.layout();
 }
 
 function stopDiffView() {
@@ -2610,6 +2616,7 @@ function stopPlayback() {
   $('cur-name').textContent = '未选择视频';
   clearLoop();
   renderFlags();
+  window.PatchUI?.onClear();
 }
 
 function openPublicVideo(link) {

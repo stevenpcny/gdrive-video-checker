@@ -32,7 +32,7 @@
   #selected-count { flex: 1; color: var(--dim); white-space: nowrap; }
   #batch-bar button { padding: 3px 8px; font-size: 12px; }
   #batch-delete-btn:not(:disabled) { color: #ff8b82; }
-  #list { flex: 1; overflow-y: auto; }
+  #list { flex: 1; min-height: 120px; overflow-y: auto; }
   .entry { padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #22252b; }
   .entry:hover { background: #262a31; }
   .entry.error-row { color: var(--bad); }
@@ -147,6 +147,35 @@
   #seek-loop { position: absolute; top: 6px; height: 14px; background: rgba(255,184,77,.22); border-left: 2px solid #ffb84d; border-right: 2px solid #ffb84d; box-sizing: border-box; pointer-events: none; }
   #seek-flags { position: absolute; left: 0; right: 0; top: 5px; height: 16px; pointer-events: none; }
   #seek-flags i { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--bad); border-radius: 1px; }
+  #patch-panel { border-top: 1px solid var(--border); padding: 6px 12px 8px; font-size: 12px; max-height: 210px; flex: 0 1 auto; min-height: 64px; display: flex; flex-direction: column; gap: 4px; overflow: auto; }
+  #patch-panel[hidden] { display: none; }
+  #patch-list .patch-row { display: flex; gap: 6px; padding: 1px 4px; border-radius: 4px; cursor: pointer; font-variant-numeric: tabular-nums; }
+  #patch-list .patch-row:hover { background: #2c3038; }
+  #patch-list .patch-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #patch-list .patch-row .range { color: var(--dim); }
+  #patch-list .hint, #patch-coverage { color: var(--dim); }
+  #patch-coverage.full { color: var(--ok); }
+  #patch-progress { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+  #patch-progress[hidden] { display: none; }
+  #patch-progress span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #patch-findings .finding { padding: 2px 4px; border-radius: 4px; cursor: pointer; line-height: 1.35; }
+  #patch-findings .finding:hover { background: #2c3038; }
+  #patch-findings .finding.fail { color: #ff8a80; }
+  #patch-findings .finding.warn { color: #ffcc80; }
+  #patch-findings .finding.ok { color: var(--ok); }
+  #patch-layer { position: absolute; pointer-events: none; z-index: 6; }
+  #seek-patches { position: absolute; left: 0; right: 0; top: 4px; height: 18px; pointer-events: none; }
+  #seek-patches .band { position: absolute; top: 3px; height: 12px; background: rgba(76,141,255,.22); border-left: 1px solid rgba(76,141,255,.9); border-right: 1px solid rgba(76,141,255,.9); box-sizing: border-box; }
+  #seek-patches .jt { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #4c8dff; }
+  #seek-patches .jt.seg { background: #b388ff; }
+  .review-card { width: min(760px, calc(100vw - 32px)); }
+  .review-scope { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--dim); margin-bottom: 8px; }
+  .review-scope input, .review-row input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 8px; font-size: 12px; }
+  .review-row { display: grid; grid-template-columns: 190px 110px 1fr; gap: 6px; align-items: start; padding: 5px 0; border-top: 1px solid var(--border); font-size: 12px; }
+  .review-row select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 2px 4px; font-size: 12px; }
+  .review-row .auto { grid-column: 2 / 4; color: var(--dim); white-space: pre-wrap; line-height: 1.35; }
+  .review-row .auto.fail { color: #ff8a80; }
+  #review-status { margin-top: 8px; font-size: 13px; }
   #flag-panel { border-top: 1px solid var(--border); padding: 6px 12px 8px; font-size: 12px; max-height: 190px; display: flex; flex-direction: column; }
   .flag-head { display: flex; align-items: center; gap: 6px; color: var(--dim); }
   #flag-title { flex: 1; }
@@ -155,7 +184,7 @@
   .flag-row { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; font-variant-numeric: tabular-nums; }
   .flag-row:hover { background: #2c3038; }
   .flag-row .frame { color: var(--bad); }
-  .flag-row .at { color: var(--dim); flex: 1; }
+  .flag-row .at { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .flag-row .del { color: var(--dim); padding: 0 4px; }
   .flag-row .del:hover { color: var(--bad); }
   #loop-state { color: #ffb84d; margin-top: 4px; min-height: 15px; }

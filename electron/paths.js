@@ -43,6 +43,7 @@ function createAppPaths(app) {
     uploadsDir,
     youtubeDir,
     marksFile: path.join(dataDir, 'marks.json'),
+    reviewsFile: path.join(dataDir, 'reviews.json'),
     settingsFile: path.join(dataDir, 'settings.json'),
     migrationFile: path.join(dataDir, 'migration.json'),
     rcloneConfigPath: path.join(rcloneDir, 'rclone.conf'),
