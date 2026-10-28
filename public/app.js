@@ -4,6 +4,7 @@ const SPEEDS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 let frameDur = 1 / 30;   // 探测到真实帧率前的兜底值
 let mediaInfo = null;    // 当前视频的 {width,height,fps,bitDepth,codec,...}
 let mediaSeq = 0;        // 探测信息自己一套序号: startFullLoad 会再推进 loadSeq
+let mediaInfoReady = Promise.resolve(); // 当前视频帧率探测完成；自动对齐要用真实帧率
 let decodeFailed = false;
 let loopIn = null;       // 区间首帧
 let loopOut = null;      // 区间尾帧(含)
@@ -311,7 +312,7 @@ function play(i) {
   clearLoop();
   resetInspectTools();
   video.src = streamUrl(curRemote, pathOf(v));
-  loadMediaInfo(v, mediaSeq);
+  mediaInfoReady = loadMediaInfo(v, mediaSeq);
   renderFlags();
   requestAnimationFrame(updateNavHitAreas);
   video.play().catch(() => {});
@@ -1364,7 +1365,8 @@ $('play-btn').onclick = () => video.paused ? video.play() : video.pause();
 $('mute-btn').onclick = () => { video.muted = !video.muted; $('mute-btn').textContent = video.muted ? '🔇' : '🔊'; };
 $('next-btn').onclick = next;
 $('prev-btn').onclick = prev;
-video.addEventListener('ended', next);
+// A/B 对比时播完停在最后一帧：跳到下一个会把 B 那条片换成 A，变成自己比自己
+video.addEventListener('ended', () => { if (!cmpOn) next(); });
 
 // ---------- 账号切换 / 导入 ----------
 let oauthFlow = null;
@@ -1965,6 +1967,9 @@ let cmpAlpha = 0.5;   // 叠加模式下 A 的不透明度
 let cmpWipeDrag = false;
 let cmpName = '';
 let cmpRaf = 0;
+let cmpAligning = false; // 自动对齐自己在挪 B，暂停跟随要让开
+let cmpLock = false;      // 同帧慢放开关
+let lockRunning = false;  // 同帧慢放正在逐帧推进
 
 const cmpTimeFor = () => Math.max(0, video.currentTime + cmpOffset * frameDur);
 
@@ -2064,8 +2069,15 @@ function syncCompare() {
       setTimeout(done, 1500);
     });
   }
-  videoB.playbackRate = video.playbackRate;
-  if (Math.abs(videoB.currentTime - target) > frameDur * 1.5) videoB.currentTime = target;
+  // 小偏差靠微调速度慢慢追上（硬 seek 会让 B 顿一下），偏得多才直接跳
+  const drift = videoB.currentTime - target;
+  if (Math.abs(drift) > frameDur * 4) {
+    videoB.currentTime = target;
+    videoB.playbackRate = video.playbackRate;
+  } else {
+    const nudge = Math.max(-0.1, Math.min(0.1, -drift / 0.5));
+    videoB.playbackRate = video.playbackRate * (1 + nudge);
+  }
   if (videoB.paused) videoB.play().catch(() => {});
   return Promise.resolve();
 }
@@ -2076,6 +2088,8 @@ function drawCompare() {
   const h = cmpCanvas.height;
   cmpCtx.clearRect(0, 0, w, h);
   if (!videoB.videoWidth) return;
+  // 同帧慢放：A 也画到画布上，否则底下的 <video> 会比 B 先换帧
+  if (lockRunning) cmpCtx.drawImage(video, 0, 0, w, h);
   if (cmpMode === 'toggle') {
     if (cmpShowB) {
       cmpCtx.drawImage(videoB, 0, 0, w, h);
@@ -2147,7 +2161,8 @@ function startCompareLoop() {
   if (cmpRaf) cancelAnimationFrame(cmpRaf);
   const tick = () => {
     if (!cmpOn) return;
-    if (videoB.getAttribute('src')) {
+    // 同帧慢放时只在两边都落定后由慢放循环画，避免画到一新一旧
+    if (videoB.getAttribute('src') && !lockRunning) {
       if (!video.paused) syncCompare();
       drawCompare();
     }
@@ -2160,6 +2175,7 @@ function startCompareLoop() {
 async function autoAlign() {
   if (!videoB.videoWidth) return toast('先选一条对照片');
   const wasPaused = video.paused;
+  cmpAligning = true;
   video.pause();
   videoB.pause();
   cmpSetStatus('正在对齐…');
@@ -2194,7 +2210,8 @@ async function autoAlign() {
   }
   const scores = [...totals.entries()].map(([offset, bucket]) => ({ offset, diff: bucket.sum / bucket.used }));
   const picked = INSPECT.pickBestOffset(scores);
-  if (!scores.length) return cmpSetStatus('<span class="hit">对不了：取不到画面</span>');
+  if (!scores.length) { cmpAligning = false; return cmpSetStatus('<span class="hit">对不了：取不到画面</span>'); }
+  cmpAligning = false;
   cmpOffset = picked.offset;
   $('cmp-offset').textContent = cmpOffset + ' 帧';
   await syncCompare();
@@ -2218,11 +2235,99 @@ async function autoAlign() {
   if (!wasPaused) video.play().catch(() => {});
 }
 
+// 播放时 B 靠循环跟随，循环只在 A 播放时同步；A 一停必须显式让 B 停到同一帧，否则 B 会继续播
+video.addEventListener('pause', () => { if (cmpOn && !cmpAligning && !lockRunning) syncCompare(); });
+
+// ---------- 同帧慢放：每一步两边都跳到位了再一起显示，保证每帧成对 ----------
+function seekEl(el, time) {
+  return new Promise(resolve => {
+    const done = () => { el.removeEventListener('seeked', done); resolve(); };
+    el.addEventListener('seeked', done);
+    el.currentTime = time;
+    setTimeout(done, 1500);
+  });
+}
+
+// 原生播放会让两边各走各的，开着同帧慢放时把「播放」改成启动/停止慢放
+video.addEventListener('play', () => {
+  if (!cmpOn || !cmpLock || !videoB.videoWidth) return;
+  video.pause();
+  if (lockRunning) lockRunning = false;
+  else runLockedPlayback();
+});
+
+async function runLockedPlayback() {
+  lockRunning = true;
+  const last = Math.round(video.duration / frameDur) - 1;
+  let steps = 0;
+  const started = performance.now();
+  while (lockRunning && cmpOn && cmpLock) {
+    const frame = targetFrame() + 1; // 每步重读，拖进度条后从新位置接着放
+    if (frame > last) break;
+    const stepStart = performance.now();
+    const tA = (frame + 0.5) * frameDur;
+    const tB = Math.min(videoB.duration - 0.001, Math.max(0, tA + cmpOffset * frameDur));
+    await Promise.all([seekEl(video, tA), seekEl(videoB, tB)]);
+    if (!lockRunning) break;
+    drawCompare();
+    $('play-btn').textContent = '⏸';
+    steps++;
+    // 小片解得比原速还快时，压回原速
+    const minStep = (frameDur / video.playbackRate) * 1000;
+    const spent = performance.now() - stepStart;
+    if (spent < minStep) await new Promise(resolve => setTimeout(resolve, minStep - spent));
+    if (steps % 12 === 0) {
+      const fps = steps / ((performance.now() - started) / 1000);
+      $('cmp-lock-rate').textContent = `${fps.toFixed(1)} 帧/秒（原速 ${Math.round(1 / frameDur)}）`;
+    }
+  }
+  lockRunning = false;
+  $('play-btn').textContent = '▶';
+  $('cmp-lock-rate').textContent = '';
+  drawCompare();
+}
+
+$('cmp-lock').onclick = () => {
+  cmpLock = !cmpLock;
+  $('cmp-lock').classList.toggle('on', cmpLock);
+  if (!cmpLock) lockRunning = false;
+  else if (!video.paused) video.pause(); // 正在原生播放就先停下，再按播放进入慢放
+  toast(cmpLock ? '同帧慢放已开：按空格或 ▶ 开始，两边每一帧都对上' : '已切回正常播放');
+};
+
 $('cmp-src').onchange = e => { if (e.target.value) loadCompareSource(Number(e.target.value)); };
 $('cmp-close-btn').onclick = closeCompare;
 $('cmp-off-minus').onclick = async () => { cmpOffset--; $('cmp-offset').textContent = cmpOffset + ' 帧'; await syncCompare(); drawCompare(); };
 $('cmp-off-plus').onclick = async () => { cmpOffset++; $('cmp-offset').textContent = cmpOffset + ' 帧'; await syncCompare(); drawCompare(); };
 $('cmp-auto').onclick = autoAlign;
+$('cmp-swap').onclick = () => {
+  const b = Number($('cmp-src').value);
+  if (!$('cmp-src').value || !videos[b]) return toast('先选一条对照片');
+  openAB(b, curIdx);
+};
+
+function videoLoaded() {
+  if (video.readyState >= 2) return Promise.resolve();
+  return new Promise(resolve => {
+    const done = () => { video.removeEventListener('loadeddata', done); resolve(); };
+    video.addEventListener('loadeddata', done);
+    setTimeout(done, 8000);
+  });
+}
+
+// 指定两条片直接开 A/B：拖入两个文件，或勾选两个后右键
+async function openAB(aIndex, bIndex) {
+  play(aIndex);
+  video.pause();
+  await Promise.all([mediaInfoReady, videoLoaded()]);
+  if (!video.videoWidth) return toast('成片载不进来，可能本机解不了这个编码');
+  await openCompare();
+  cmpOffset = 0;
+  $('cmp-offset').textContent = '0 帧';
+  $('cmp-src').value = String(bIndex);
+  await loadCompareSource(bIndex);
+  if (videoB.videoWidth) await autoAlign();
+}
 
 document.querySelectorAll('.cmp-modes button').forEach(button => {
   button.onclick = () => setCompareMode(button.dataset.mode);
@@ -2346,19 +2451,54 @@ function clearLoop() {
   renderLoop();
 }
 
+// ---------- 列表右键：勾选两个视频做 A/B ----------
+const ctxMenu = $('ctx-menu');
+
+function closeCtxMenu() { ctxMenu.hidden = true; }
+
+$('list').addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const picked = selectedBatchItems()
+    .filter(item => !item.isDir)
+    .map(item => videos.findIndex(v => v.Name === item.name))
+    .filter(index => index >= 0)
+    .sort((a, b) => a - b);
+  ctxMenu.replaceChildren();
+  const addItem = (label, action) => {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.disabled = !action;
+    if (action) button.onclick = () => { closeCtxMenu(); action(); };
+    ctxMenu.appendChild(button);
+  };
+  if (picked.length === 2) {
+    const [a, b] = picked;
+    addItem(`A/B 对比：A=${videos[a].Name}，B=${videos[b].Name}`, () => openAB(a, b));
+    addItem(`对调后对比：A=${videos[b].Name}，B=${videos[a].Name}`, () => openAB(b, a));
+  } else {
+    addItem(`勾选两个视频后可做 A/B 对比（已勾选 ${picked.length} 个）`, null);
+  }
+  ctxMenu.hidden = false;
+  ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - ctxMenu.offsetWidth - 8) + 'px';
+  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - ctxMenu.offsetHeight - 8) + 'px';
+});
+document.addEventListener('pointerdown', e => { if (!ctxMenu.contains(e.target)) closeCtxMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtxMenu(); });
+$('list').addEventListener('scroll', closeCtxMenu);
+
 // ---------- 本地视频: 拖进来或自己选 ----------
 async function openLocalPaths(paths) {
   const list = (paths || []).filter(Boolean);
   if (!list.length) return;
   try {
     const result = await api('/api/local/open', { method: 'POST', body: JSON.stringify({ paths: list }) });
-    await enterLocalMode(result);
+    await enterLocalMode(result, list.length);
   } catch (error) {
     toast('打开本地视频失败: ' + error.message);
   }
 }
 
-async function enterLocalMode(result) {
+async function enterLocalMode(result, requested) {
   stopPlayback();
   localMode = true;
   localDir = result.dir;
@@ -2383,8 +2523,11 @@ async function enterLocalMode(result) {
   }
   const picked = (result.startNames || [])
     .map(name => videos.findIndex(v => v.Name === name))
-    .find(index => index >= 0);
-  play(picked === undefined ? 0 : picked);
+    .filter(index => index >= 0);
+  // 正好给了两个：第一个当成片 A，第二个当原片 B，直接对比
+  if (requested === 2 && picked.length === 2) return openAB(picked[0], picked[1]);
+  play(picked.length ? picked[0] : 0);
+  if (requested === 2) toast('A/B 对比需要同一个文件夹里的两个视频，这次只打开了第一个');
 }
 
 function exitLocalMode() {
